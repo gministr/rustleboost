@@ -1,0 +1,37 @@
+{
+  "_comment": "Примеры URI для тестирования парсера подписок",
+
+  "vless_reality": "vless://a1b2c3d4-e5f6-7890-abcd-ef1234567890@your.server.com:443?encryption=none&security=reality&pbk=PUBLIC_KEY_HERE&fp=chrome&sni=www.google.com&sid=abcd1234&flow=xtls-rprx-vision&type=tcp#RU-Moscow-VLESS-Reality",
+
+  "vless_ws_tls": "vless://a1b2c3d4-e5f6-7890-abcd-ef1234567890@your.server.com:443?encryption=none&security=tls&sni=your.server.com&fp=chrome&type=ws&path=%2Fvless&host=your.server.com#NL-Amsterdam-VLESS-WS",
+
+  "hysteria2": "hysteria2://yourpassword@your.server.com:8443?sni=your.server.com&insecure=0#DE-Frankfurt-Hy2",
+
+  "hysteria2_obfs": "hysteria2://yourpassword@your.server.com:8443?sni=your.server.com&obfs=salamander&obfs-password=obfspassword#FI-Helsinki-Hy2-Obfs",
+
+  "naive": "naive+https://username:password@your.server.com:8443#SE-Stockholm-Naive",
+
+  "subscription_url_example": "https://sub.lindavpn.com/your-secret-token",
+
+  "singbox_outbound_example": {
+    "type": "vless",
+    "tag": "VLESS-Reality-RU",
+    "server": "your.server.com",
+    "server_port": 443,
+    "uuid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "flow": "xtls-rprx-vision",
+    "tls": {
+      "enabled": true,
+      "server_name": "www.google.com",
+      "utls": {
+        "enabled": true,
+        "fingerprint": "chrome"
+      },
+      "reality": {
+        "enabled": true,
+        "public_key": "PUBLIC_KEY_HERE",
+        "short_id": "abcd1234"
+      }
+    }
+  }
+}
