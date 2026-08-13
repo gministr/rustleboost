@@ -138,8 +138,8 @@ export function daysLeft(expire: number): number | null {
 
 export function latencyColor(ms: number): string {
   if (ms < 0) return "text-gray-500";
-  if (ms < 100) return "text-green-400";
-  if (ms < 200) return "text-yellow-400";
+  if (ms < 250) return "text-green-400";
+  if (ms < 500) return "text-yellow-400";
   return "text-red-400";
 }
 

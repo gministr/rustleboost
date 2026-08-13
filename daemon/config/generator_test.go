@@ -158,6 +158,86 @@ func TestRouteBypassesTunnelLoop(t *testing.T) {
 	}
 }
 
+// Windows calls an interface offline until its own probe succeeds through it,
+// and that probe starts with a DNS lookup. Leaving DNS to the physical
+// adapter is what kept the tray on "No Internet" while the tunnel worked.
+func TestRouteHijacksDNSInTunnelMode(t *testing.T) {
+	s := parseOne(t, grpcRealityURI)
+
+	cfg, err := Generate(s, Options{TUNMode: true})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	var byProtocol, byPort bool
+	for _, rule := range cfg.Route.Rules {
+		if rule.Action != "hijack-dns" {
+			continue
+		}
+		if rule.Protocol == "dns" {
+			byProtocol = true
+		}
+		for _, p := range rule.Port {
+			if p == 53 {
+				byPort = true
+			}
+		}
+	}
+
+	if !byProtocol || !byPort {
+		t.Errorf("DNS not hijacked (protocol=%v port=%v)", byProtocol, byPort)
+	}
+
+	tun, ok := cfg.Inbounds[1].(TUNInbound)
+	if !ok {
+		t.Fatalf("second inbound is %T, want TUNInbound", cfg.Inbounds[1])
+	}
+	if !tun.StrictRoute {
+		t.Error("strict_route off — system probes bypass the tunnel")
+	}
+}
+
+// Every node needs its own inbound and outbound, or the probe measures one
+// node repeatedly and reports the same latency for the whole list.
+func TestProbeConfigIsolatesEachNode(t *testing.T) {
+	a := parseOne(t, grpcRealityURI)
+	b := parseOne(t, xhttpTLSURI)
+
+	cfg, err := GenerateXrayProbe([]ProbeTarget{
+		{ServerID: a.ID, Outbound: a.Outbound, Port: 23100},
+		{ServerID: b.ID, Outbound: b.Outbound, Port: 23101},
+	})
+	if err != nil {
+		t.Fatalf("generate probe: %v", err)
+	}
+
+	if len(cfg.Inbounds) != 2 || len(cfg.Outbounds) != 2 {
+		t.Fatalf("got %d inbounds / %d outbounds, want 2 each",
+			len(cfg.Inbounds), len(cfg.Outbounds))
+	}
+
+	seen := map[string]string{}
+	for _, rule := range cfg.Routing.Rules {
+		if len(rule.InboundTag) != 1 {
+			t.Fatalf("rule matches %d inbounds, want 1", len(rule.InboundTag))
+		}
+		seen[rule.InboundTag[0]] = rule.OutboundTag
+	}
+
+	if seen["in-0"] != "out-0" || seen["in-1"] != "out-1" {
+		t.Errorf("probe routing crossed over: %v", seen)
+	}
+
+	ports := map[int]bool{}
+	for _, raw := range cfg.Inbounds {
+		in := raw.(XraySocksInbound)
+		if ports[in.Port] {
+			t.Errorf("duplicate probe port %d", in.Port)
+		}
+		ports[in.Port] = true
+	}
+}
+
 func TestGenerateXrayCarriesNodeOutbound(t *testing.T) {
 	s := parseOne(t, xhttpTLSURI)
 

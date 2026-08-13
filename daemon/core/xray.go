@@ -22,6 +22,21 @@ func NewXrayRunner(dataDir string) *XrayRunner {
 	return &XrayRunner{proc: newProcRunner("xray", dataDir)}
 }
 
+// NewXrayProbeRunner returns a second Xray used only for latency measurement.
+// It writes its own config, log and pid files so a probe never disturbs the
+// instance carrying the user's traffic.
+func NewXrayProbeRunner(dataDir string) *XrayRunner {
+	return &XrayRunner{proc: newProcRunnerNamed("xray", "xray-probe", dataDir)}
+}
+
+func (r *XrayRunner) StartProbe(cfg *config.XrayConfig) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal probe config: %w", err)
+	}
+	return r.proc.start(data, "xray-probe-config.json", "run")
+}
+
 func (r *XrayRunner) Start(cfg *config.XrayConfig) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {

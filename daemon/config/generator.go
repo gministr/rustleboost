@@ -115,6 +115,8 @@ type RouteConfig struct {
 
 type RouteRule struct {
 	Action       string   `json:"action,omitempty"`
+	Protocol     string   `json:"protocol,omitempty"`
+	Port         []int    `json:"port,omitempty"`
 	IPIsPrivate  *bool    `json:"ip_is_private,omitempty"`
 	Domain       []string `json:"domain,omitempty"`
 	DomainSuffix []string `json:"domain_suffix,omitempty"`
@@ -157,6 +159,17 @@ type XrayConfig struct {
 	Log       *XrayLog          `json:"log,omitempty"`
 	Inbounds  []interface{}     `json:"inbounds"`
 	Outbounds []json.RawMessage `json:"outbounds"`
+	Routing   *XrayRouting      `json:"routing,omitempty"`
+}
+
+type XrayRouting struct {
+	Rules []XrayRule `json:"rules"`
+}
+
+type XrayRule struct {
+	Type        string   `json:"type"`
+	InboundTag  []string `json:"inboundTag"`
+	OutboundTag string   `json:"outboundTag"`
 }
 
 type XrayLog struct {
@@ -217,6 +230,73 @@ func GenerateXray(server subscription.Server, opts Options) (*XrayConfig, error)
 		},
 		Outbounds: []json.RawMessage{server.Outbound, direct, block},
 	}, nil
+}
+
+// ProbeTarget pairs a server with the local port its probe traffic uses.
+type ProbeTarget struct {
+	ServerID string
+	Outbound json.RawMessage
+	Port     int
+}
+
+// GenerateXrayProbe builds a measurement config: one SOCKS inbound per node,
+// each routed to that node's own outbound.
+//
+// Measuring latency by opening a TCP connection to the node only times the
+// first hop — it says nothing about whether the proxy actually carries
+// traffic, and for CDN-fronted nodes every location returns the same few
+// milliseconds. Sending a real request through each outbound is the only
+// measurement that reflects what the user will experience, and one process
+// with N inbounds does all of them at once.
+func GenerateXrayProbe(targets []ProbeTarget) (*XrayConfig, error) {
+	if len(targets) == 0 {
+		return nil, fmt.Errorf("no probe targets")
+	}
+
+	cfg := &XrayConfig{
+		Log:     &XrayLog{LogLevel: "none"},
+		Routing: &XrayRouting{},
+	}
+
+	for i, target := range targets {
+		inTag := fmt.Sprintf("in-%d", i)
+		outTag := fmt.Sprintf("out-%d", i)
+
+		cfg.Inbounds = append(cfg.Inbounds, XraySocksInbound{
+			Tag:      inTag,
+			Listen:   "127.0.0.1",
+			Port:     target.Port,
+			Protocol: "socks",
+			Settings: XraySocksSettings{Auth: "noauth", UDP: false},
+		})
+
+		outbound, err := retagXrayOutbound(target.Outbound, outTag)
+		if err != nil {
+			return nil, fmt.Errorf("probe outbound %s: %w", target.ServerID, err)
+		}
+		cfg.Outbounds = append(cfg.Outbounds, outbound)
+
+		cfg.Routing.Rules = append(cfg.Routing.Rules, XrayRule{
+			Type:        "field",
+			InboundTag:  []string{inTag},
+			OutboundTag: outTag,
+		})
+	}
+
+	return cfg, nil
+}
+
+func retagXrayOutbound(raw json.RawMessage, tag string) (json.RawMessage, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(tag)
+	if err != nil {
+		return nil, err
+	}
+	m["tag"] = encoded
+	return json.Marshal(m)
 }
 
 // NeedsXray reports whether a server must be carried by Xray-core.
@@ -298,6 +378,15 @@ func buildRoute(server subscription.Server, opts Options) RouteConfig {
 	}
 
 	if opts.TUNMode {
+		// Answer DNS inside sing-box instead of letting queries leak to
+		// whatever resolver the physical adapter uses. Windows' connectivity
+		// check resolves dns.msftncsi.com before it will call an interface
+		// online, so this is what gets the tray out of "No Internet".
+		rules = append(rules,
+			RouteRule{Action: "hijack-dns", Protocol: "dns"},
+			RouteRule{Action: "hijack-dns", Port: []int{53}},
+		)
+
 		// Everything the cores themselves send must bypass the tunnel,
 		// otherwise the proxy leg is routed back into TUN and deadlocks. This
 		// covers nodes addressed by bare IP, which a domain rule cannot match.
@@ -360,10 +449,12 @@ func buildInbounds(opts Options) []interface{} {
 			InterfaceName: "RustleBoost",
 			Address:       []string{"172.19.0.1/30"},
 			MTU:           1500,
-			AutoRoute:     true,
-			// false keeps Windows' own connectivity probes on the physical
-			// NIC, so the tray reports "Connected" instead of "No Internet".
-			StrictRoute:            false,
+			AutoRoute: true,
+			// Windows decides an interface is online by probing through it.
+			// With strict_route off, its probes went out the physical NIC
+			// instead, so the adapter kept reporting "No Internet" the whole
+			// time the tunnel was actually working.
+			StrictRoute:            true,
 			Stack:                  "mixed",
 			EndpointIndependentNat: true,
 		})

@@ -49,8 +49,12 @@ export default function MainPage() {
 
   const handlePingAll = async () => {
     setPinging(true);
-    await pingAll();
-    setTimeout(async () => { await fetchServers(); setPinging(false); }, 3500);
+    try {
+      await pingAll();
+      await fetchServers();
+    } finally {
+      setPinging(false);
+    }
   };
 
   const handlePingOne = async (serverId: string) => {

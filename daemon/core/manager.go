@@ -48,6 +48,7 @@ type Manager struct {
 	store       *storage.Store
 	singbox     *SingBoxRunner
 	xray        *XrayRunner
+	prober      *LatencyProber
 	servers     []subscription.Server
 	info        subscription.Info
 	current     *subscription.Server
@@ -65,6 +66,7 @@ func NewManager(dataDir string, store *storage.Store) *Manager {
 		state:   StateDisconnected,
 		singbox: NewSingBoxRunner(dataDir),
 		xray:    NewXrayRunner(dataDir),
+		prober:  NewLatencyProber(dataDir),
 	}
 
 	m.loadCache()
@@ -229,11 +231,24 @@ func (m *Manager) Connect(serverID string) error {
 		return m.failConnect(fmt.Errorf("sing-box: %w", err))
 	}
 
-	// The system proxy carries all traffic in proxy mode; in TUN mode it also
-	// gives Windows' connectivity check a fast path, so the tray flips to
-	// "Connected" in a couple of seconds instead of a polling cycle later.
-	SetSystemProxy(fmt.Sprintf("127.0.0.1:%d", config.MixedPort))
-	go warmupVPNTunnel()
+	// In TUN mode the adapter already carries everything. Setting a system
+	// proxy on top adds a second, redundant path and misleads apps that
+	// honour it, so it belongs to proxy mode only.
+	if !settings.TUNMode {
+		SetSystemProxy(fmt.Sprintf("127.0.0.1:%d", config.MixedPort))
+	}
+
+	// Cores accept connections before the first handshake completes, so
+	// reporting "connected" the moment they start leaves the user staring at
+	// a green screen while nothing loads. Hold the state until real traffic
+	// makes it through.
+	if err := waitForTunnelReady(tunnelReadyTimeout); err != nil {
+		log.Printf("[connect] tunnel not verified within %s: %v", tunnelReadyTimeout, err)
+	}
+
+	if settings.TUNMode {
+		go setNetworkCategoryPrivate()
+	}
 
 	m.mu.Lock()
 	m.state = StateConnected
@@ -437,16 +452,12 @@ func (m *Manager) PingServer(serverID string) (int, error) {
 		return -1, fmt.Errorf("server not found")
 	}
 
-	latency := pingTCP(target.Address, target.Port)
-
-	m.mu.Lock()
-	for i := range m.servers {
-		if m.servers[i].ID == serverID {
-			m.servers[i].Latency = latency
-			break
-		}
+	results := m.prober.Measure([]subscription.Server{*target})
+	latency, ok := results[serverID]
+	if !ok {
+		latency = -1
 	}
-	m.mu.Unlock()
+	m.applyLatency(results)
 
 	return latency, nil
 }
@@ -457,28 +468,21 @@ func (m *Manager) PingAll() {
 	copy(servers, m.servers)
 	m.mu.RUnlock()
 
-	results := make([]int, len(servers))
-	var wg sync.WaitGroup
-	for i, s := range servers {
-		wg.Add(1)
-		go func(idx int, srv subscription.Server) {
-			defer wg.Done()
-			results[idx] = pingTCP(srv.Address, srv.Port)
-		}(i, s)
+	if len(servers) == 0 {
+		return
 	}
-	wg.Wait()
+	m.applyLatency(m.prober.Measure(servers))
+}
 
+func (m *Manager) applyLatency(results map[string]int) {
 	m.mu.Lock()
-	byID := make(map[string]int, len(servers))
-	for i, s := range servers {
-		byID[s.ID] = results[i]
-	}
+	defer m.mu.Unlock()
+
 	for i := range m.servers {
-		if lat, ok := byID[m.servers[i].ID]; ok {
+		if lat, ok := results[m.servers[i].ID]; ok {
 			m.servers[i].Latency = lat
 		}
 	}
-	m.mu.Unlock()
 }
 
 // FastestServerID returns the reachable server with the lowest latency,
@@ -547,37 +551,53 @@ func waitForPort(port int, timeout time.Duration) error {
 // GetHWID returns the device HWID info for display in UI
 func (m *Manager) GetHWID() HWIDInfo { return GetHWIDInfo() }
 
-// warmupVPNTunnel pre-establishes the tunnel and marks the adapter as a
-// Private network, so Windows reports "Connected" rather than sitting on
-// "No Internet" until its next NLA re-check.
-func warmupVPNTunnel() {
-	proxy := fmt.Sprintf("127.0.0.1:%d", config.MixedPort)
+// tunnelReadyTimeout bounds how long a connect waits for proof that traffic
+// flows. Past it we report connected anyway: the probe host may be
+// unreachable while the rest of the internet works fine.
+const tunnelReadyTimeout = 15 * time.Second
 
-	for i := 0; i < 30; i++ {
-		conn, err := net.DialTimeout("tcp", proxy, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+// probeURL is a captive-portal endpoint: it answers 204 with an empty body,
+// so a round trip measures the tunnel rather than a page download.
+const probeURL = "http://cp.cloudflare.com/generate_204"
+
+// waitForTunnelReady polls through the local mixed inbound until a request
+// completes end to end — inbound, routing, proxy outbound, and the node
+// itself. That is the first moment the connection is genuinely usable.
+func waitForTunnelReady(timeout time.Duration) error {
+	proxy := fmt.Sprintf("127.0.0.1:%d", config.MixedPort)
 
 	proxyURL, err := url.Parse("http://" + proxy)
 	if err != nil {
-		return
+		return err
 	}
 	client := &http.Client{
-		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
-		Timeout:   8 * time.Second,
-	}
-	if resp, err := client.Head("http://connectivitycheck.gstatic.com/generate_204"); err == nil {
-		resp.Body.Close()
-		log.Println("[warmup] VPN tunnel warmed up successfully")
-	} else {
-		log.Printf("[warmup] warmup failed (non-critical): %v", err)
+		Transport: &http.Transport{
+			Proxy:               http.ProxyURL(proxyURL),
+			DisableKeepAlives:   true,
+			TLSHandshakeTimeout: 5 * time.Second,
+		},
+		Timeout: 6 * time.Second,
 	}
 
-	setNetworkCategoryPrivate()
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+
+	for time.Now().Before(deadline) {
+		start := time.Now()
+		resp, err := client.Get(probeURL)
+		if err == nil {
+			resp.Body.Close()
+			log.Printf("[connect] tunnel ready in %dms", time.Since(start).Milliseconds())
+			return nil
+		}
+		lastErr = err
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timeout")
+	}
+	return lastErr
 }
 
 func setNetworkCategoryPrivate() {

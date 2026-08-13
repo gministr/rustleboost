@@ -19,10 +19,12 @@ export default function ServerCard({
   const [hovered, setHovered] = useState(false);
 
   const lat = server.latency;
+  // Thresholds allow for a full request through the tunnel, not a bare TCP
+  // handshake: a healthy European node from Russia lands around 150-250 ms.
   const latColor = isPinging || lat < 0
     ? "rgba(255,255,255,0.2)"
-    : lat < 100 ? "#4ade80"
-    : lat < 200 ? "#facc15"
+    : lat < 250 ? "#4ade80"
+    : lat < 500 ? "#facc15"
     : "#f87171";
 
   const displayName = stripNameEmoji(server.name);

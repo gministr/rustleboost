@@ -169,15 +169,24 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     }
   },
 
+  // Measuring runs in the daemon and takes a few seconds — it opens a real
+  // request through every node. Poll so results appear as they land instead
+  // of after one arbitrary delay.
   pingAll: async () => {
     try {
       await api.pingAll();
-      setTimeout(async () => {
+    } catch {
+      return;
+    }
+
+    for (let i = 0; i < 10; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      try {
         const servers = await api.getServers();
         set({ servers: servers ?? [] });
-      }, 3000);
-    } catch {
-      //
+      } catch {
+        // daemon busy; try again on the next tick
+      }
     }
   },
 

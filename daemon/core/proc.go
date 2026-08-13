@@ -18,19 +18,27 @@ import (
 // Both cores take the same shape of arguments — a config file and a run
 // verb — so the lifecycle logic lives here once.
 type procRunner struct {
-	mu      sync.Mutex
-	name    string // "sing-box" | "xray", also the binary stem
-	dataDir string
-	cmd     *exec.Cmd
-	running atomic.Bool
-	logPath string
+	mu       sync.Mutex
+	binary   string // "sing-box" | "xray" — the binary stem
+	instance string // names this runner's log and pid files
+	dataDir  string
+	cmd      *exec.Cmd
+	running  atomic.Bool
+	logPath  string
 }
 
 func newProcRunner(name, dataDir string) *procRunner {
+	return newProcRunnerNamed(name, name, dataDir)
+}
+
+// newProcRunnerNamed lets a second copy of a core run without overwriting the
+// log and pid files of the one carrying the user's traffic.
+func newProcRunnerNamed(binary, instance, dataDir string) *procRunner {
 	return &procRunner{
-		name:    name,
-		dataDir: dataDir,
-		logPath: filepath.Join(dataDir, name+".log"),
+		binary:   binary,
+		instance: instance,
+		dataDir:  dataDir,
+		logPath:  filepath.Join(dataDir, instance+".log"),
 	}
 }
 
@@ -47,12 +55,12 @@ func (p *procRunner) start(cfgJSON []byte, cfgName string, args ...string) error
 
 	cfgPath := filepath.Join(p.dataDir, cfgName)
 	if err := os.WriteFile(cfgPath, cfgJSON, 0600); err != nil {
-		return fmt.Errorf("write %s config: %w", p.name, err)
+		return fmt.Errorf("write %s config: %w", p.binary, err)
 	}
 
 	binary := p.findBinary()
 	if binary == "" {
-		return fmt.Errorf("%s binary not found", p.name)
+		return fmt.Errorf("%s binary not found", p.binary)
 	}
 
 	logFile, _ := os.OpenFile(p.logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
@@ -67,18 +75,18 @@ func (p *procRunner) start(cfgJSON []byte, cfgName string, args ...string) error
 		if logFile != nil {
 			logFile.Close()
 		}
-		return fmt.Errorf("start %s: %w", p.name, err)
+		return fmt.Errorf("start %s: %w", p.binary, err)
 	}
 
 	p.running.Store(true)
-	writePIDFile(p.dataDir, p.name, p.cmd.Process.Pid)
-	log.Printf("[%s] started pid=%d", p.name, p.cmd.Process.Pid)
+	writePIDFile(p.dataDir, p.instance, p.cmd.Process.Pid)
+	log.Printf("[%s] started pid=%d", p.instance, p.cmd.Process.Pid)
 
 	cmd := p.cmd
 	go func() {
 		cmd.Wait()
 		p.running.Store(false)
-		log.Printf("[%s] exited", p.name)
+		log.Printf("[%s] exited", p.instance)
 	}()
 
 	time.Sleep(400 * time.Millisecond)
@@ -87,7 +95,7 @@ func (p *procRunner) start(cfgJSON []byte, cfgName string, args ...string) error
 	}
 
 	if !p.running.Load() {
-		return fmt.Errorf("%s exited immediately:\n%s", p.name, tailFile(p.logPath, 8))
+		return fmt.Errorf("%s exited immediately:\n%s", p.binary, tailFile(p.logPath, 8))
 	}
 	return nil
 }
@@ -116,7 +124,7 @@ func (p *procRunner) stopLocked() {
 	}
 	p.running.Store(false)
 	p.cmd = nil
-	removePIDFile(p.dataDir, p.name)
+	removePIDFile(p.dataDir, p.instance)
 }
 
 // ── stale core cleanup ────────────────────────────────────────────────────
@@ -141,8 +149,15 @@ func removePIDFile(dataDir, name string) {
 
 // CleanupStaleCores terminates cores left behind by a previous run.
 func CleanupStaleCores(dataDir string) {
-	for _, name := range []string{"sing-box", "xray"} {
-		path := pidFilePath(dataDir, name)
+	// instance name → the image name it actually runs under
+	cores := map[string]string{
+		"sing-box":   "sing-box",
+		"xray":       "xray",
+		"xray-probe": "xray",
+	}
+
+	for instance, binary := range cores {
+		path := pidFilePath(dataDir, instance)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -153,8 +168,8 @@ func CleanupStaleCores(dataDir string) {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if killStaleProcess(pid, name) {
-			log.Printf("[cleanup] terminated stale %s (pid=%d)", name, pid)
+		if killStaleProcess(pid, binary) {
+			log.Printf("[cleanup] terminated stale %s (pid=%d)", instance, pid)
 		}
 	}
 }
@@ -187,11 +202,11 @@ func (p *procRunner) logTail(n int) string { return tailFile(p.logPath, n) }
 // findBinary looks beside the daemon executable first — that is where the
 // installer places the bundled cores — then falls back to the data dir and PATH.
 func (p *procRunner) findBinary() string {
-	names := []string{p.name}
+	names := []string{p.binary}
 	if runtime.GOOS == "windows" {
 		// The installer drops plain names beside the app; a dev tree keeps
 		// the Tauri sidecar names instead.
-		names = []string{p.name + ".exe", p.name + "-x86_64-pc-windows-msvc.exe"}
+		names = []string{p.binary + ".exe", p.binary + "-x86_64-pc-windows-msvc.exe"}
 	}
 
 	var dirs []string
@@ -208,7 +223,7 @@ func (p *procRunner) findBinary() string {
 			}
 		}
 	}
-	if path, err := exec.LookPath(p.name); err == nil {
+	if path, err := exec.LookPath(p.binary); err == nil {
 		return path
 	}
 	return ""
