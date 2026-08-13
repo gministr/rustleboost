@@ -6,10 +6,31 @@ export interface Server {
   country: string;
   flag: string;
   protocol: string;
+  /** tcp | grpc | xhttp | ws | httpupgrade | kcp — decides which core carries it */
+  transport: string;
+  /** reality | tls | none */
+  security: string;
+  /** "xray" | "singbox" */
+  engine: string;
   address: string;
   port: number;
   latency: number;
   raw_uri: string;
+}
+
+/** Traffic and validity, as reported by the subscription's own headers. */
+export interface SubscriptionInfo {
+  upload: number;
+  download: number;
+  /** 0 means unlimited */
+  total: number;
+  /** unix seconds; 0 means no expiry */
+  expire: number;
+  title: string;
+  announce: string;
+  support_url: string;
+  web_page_url: string;
+  updated_at: number;
 }
 
 export interface ConnectionStats {
@@ -28,6 +49,8 @@ export interface Status {
   state: ConnectionState;
   server?: Server;
   stats: ConnectionStats;
+  /** which cores are carrying the session, e.g. "sing-box + xray" */
+  engine?: string;
   error?: string;
 }
 
@@ -60,10 +83,14 @@ export const api = {
   getStatus: () => call<Status>("get_status"),
   getHWID: () => call<HWIDInfo>("get_hwid"),
   connect: (serverId: string) => call<{ status: string }>("connect_server", { serverId }),
+  connectFastest: () =>
+    call<{ status: string; server_id: string }>("connect_fastest"),
   disconnect: () => call<{ status: string }>("disconnect"),
   getServers: () => call<Server[]>("get_servers"),
+  getSubscription: () =>
+    call<{ url: string; servers: number; info: SubscriptionInfo }>("get_subscription"),
   updateSubscription: (url: string) =>
-    call<{ status: string; servers: number }>("update_subscription", { url }),
+    call<{ status: string; servers: number; info: SubscriptionInfo }>("update_subscription", { url }),
   getSettings: () => call<Settings>("get_settings"),
   saveSettings: (settings: Partial<Settings>) =>
     call<Settings>("save_settings", { settings }),
@@ -87,6 +114,26 @@ export function formatUptime(seconds: number): string {
   const s = seconds % 60;
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+/** Short label for a node's transport, e.g. "GRPC · REALITY". */
+export function transportLabel(server: Server): string {
+  const parts = [server.transport, server.security]
+    .filter(p => p && p !== "none")
+    .map(p => p.toUpperCase());
+  return parts.join(" · ");
+}
+
+export function formatExpiry(expire: number): string {
+  if (!expire) return "бессрочно";
+  return new Date(expire * 1000).toLocaleDateString("ru-RU", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+  });
+}
+
+export function daysLeft(expire: number): number | null {
+  if (!expire) return null;
+  return Math.ceil((expire * 1000 - Date.now()) / 86_400_000);
 }
 
 export function latencyColor(ms: number): string {

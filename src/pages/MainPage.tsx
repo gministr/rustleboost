@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { RefreshCw, Wifi, Globe } from "lucide-react";
+import { RefreshCw, Wifi, Globe, Zap, ArrowDown, ArrowUp } from "lucide-react";
 import { useVPNStore } from "../store/vpnStore";
 import ConnectionButton from "../components/ConnectionButton";
 import ServerCard from "../components/ServerCard";
-import { formatUptime, api } from "../api/daemon";
+import SubscriptionCard from "../components/SubscriptionCard";
+import { formatUptime, formatBytes, api } from "../api/daemon";
 
 const stateLabels: Record<string, string> = {
   disconnected:  "Не подключено",
@@ -22,9 +23,9 @@ const stateColors: Record<string, string> = {
 
 export default function MainPage() {
   const {
-    status, servers, connect, disconnect,
-    error, clearError, updateSubscription, settings,
-    fetchServers, pingAll,
+    status, servers, connect, connectFastest, disconnect,
+    error, clearError, updateSubscription, settings, info,
+    fetchServers, pingAll, connectingId,
   } = useVPNStore();
   const { state, server, stats } = status;
 
@@ -32,12 +33,12 @@ export default function MainPage() {
   const [pinging, setPinging]         = useState(false);
   const [pingingId, setPingingId]     = useState<string | null>(null);
 
+  // With no server chosen yet, pick the fastest reachable one rather than
+  // whichever happens to sit at the top of the list.
   const handleToggle = () => {
     if (state === "connected" || state === "connecting") disconnect();
-    else {
-      const target = server ?? servers[0];
-      if (target) connect(target.id);
-    }
+    else if (server) connect(server.id);
+    else connectFastest();
   };
 
   const handleRefreshSub = async () => {
@@ -91,8 +92,11 @@ export default function MainPage() {
         )}
       </AnimatePresence>
 
+      {/* Subscription traffic + expiry */}
+      {info && <SubscriptionCard info={info} />}
+
       {/* Status + Button */}
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 20, paddingBottom: 12, flexShrink: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 16, paddingBottom: 12, flexShrink: 0 }}>
         <p style={{ fontSize: 19, fontWeight: 700, marginBottom: 4, letterSpacing: "-0.02em", color: stateColors[state], transition: "color 0.3s" }}>
           {stateLabels[state]}
         </p>
@@ -100,6 +104,18 @@ export default function MainPage() {
           <p style={{ fontSize: 12, color: "var(--c-uptime)", fontFamily: "monospace", marginBottom: 4 }}>
             {formatUptime(stats.uptime)}
           </p>
+        )}
+        {state === "connected" && (
+          <div style={{ display: "flex", gap: 12, fontSize: 11, color: "var(--c-text-dim)", fontFamily: "monospace" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
+              <ArrowDown size={10} style={{ color: "#4ade80" }} />
+              {formatBytes(stats.download)}
+            </span>
+            <span style={{ display: "flex", alignItems: "center", gap: 3 }}>
+              <ArrowUp size={10} style={{ color: "#60a5fa" }} />
+              {formatBytes(stats.upload)}
+            </span>
+          </div>
         )}
         <div style={{ marginTop: 8, marginBottom: 4 }}>
           <ConnectionButton state={state} onClick={handleToggle} />
@@ -121,6 +137,16 @@ export default function MainPage() {
             )}
           </p>
           <div style={{ display: "flex", gap: 6 }}>
+            <IconBtn
+              title="Подключиться к самому быстрому"
+              disabled={servers.length === 0 || connectingId === "auto"}
+              onClick={connectFastest}
+            >
+              <Zap size={13} style={{
+                color: connectingId === "auto" ? "#facc15" : undefined,
+                animation: connectingId === "auto" ? "pulse 1s infinite" : "none",
+              }} />
+            </IconBtn>
             <IconBtn title="Проверить пинг" disabled={pinging || servers.length === 0} onClick={handlePingAll}>
               <Wifi size={13} style={{ animation: pinging ? "pulse 1s infinite" : "none" }} />
             </IconBtn>

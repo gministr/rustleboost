@@ -22,6 +22,9 @@ func main() {
 		log.Fatalf("Failed to create data dir: %v", err)
 	}
 
+	// A previous run may have been killed before it could stop its cores.
+	core.CleanupStaleCores(*dataDir)
+
 	store := storage.New(filepath.Join(*dataDir, "settings.json"))
 	if err := store.Load(); err != nil {
 		log.Printf("No existing settings, using defaults: %v", err)

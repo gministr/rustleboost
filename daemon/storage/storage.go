@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -21,14 +22,16 @@ type Settings struct {
 }
 
 type Store struct {
-	mu       sync.RWMutex
-	path     string
-	settings Settings
+	mu        sync.RWMutex
+	path      string
+	cachePath string
+	settings  Settings
 }
 
 func New(path string) *Store {
 	return &Store{
-		path: path,
+		path:      path,
+		cachePath: filepath.Join(filepath.Dir(path), "subscription-cache.json"),
 		settings: Settings{
 			AutoUpdate:     true,
 			UpdateInterval: 12,
@@ -71,4 +74,19 @@ func (s *Store) UpdateSettings(fn func(*Settings)) error {
 	fn(&s.settings)
 	s.mu.Unlock()
 	return s.Save()
+}
+
+// SaveCache persists the last successful subscription refresh so the app can
+// show its server list and traffic figures immediately on the next launch,
+// rather than an empty screen until the panel answers.
+func (s *Store) SaveCache(data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return os.WriteFile(s.cachePath, data, 0600)
+}
+
+func (s *Store) LoadCache() ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return os.ReadFile(s.cachePath)
 }

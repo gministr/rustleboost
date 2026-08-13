@@ -34,8 +34,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::connect_server,
+            commands::connect_fastest,
             commands::disconnect,
             commands::get_servers,
+            commands::get_subscription,
             commands::update_subscription,
             commands::get_settings,
             commands::save_settings,

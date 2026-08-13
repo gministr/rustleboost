@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { ChevronRight, Wifi } from "lucide-react";
-import { Server } from "../api/daemon";
+import { Server, transportLabel } from "../api/daemon";
 import FlagImage, { stripNameEmoji } from "./FlagImage";
 
 interface Props {
@@ -26,6 +26,7 @@ export default function ServerCard({
     : "#f87171";
 
   const displayName = stripNameEmoji(server.name);
+  const transport = transportLabel(server);
 
   return (
     <motion.div
@@ -62,8 +63,12 @@ export default function ServerCard({
         </p>
         <p style={{
           fontSize: 11, color: "var(--c-text-sub)", margin: "2px 0 0",
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
         }}>
           {server.protocol}
+          {transport && (
+            <span style={{ color: "var(--c-text-dimmer)" }}> · {transport}</span>
+          )}
         </p>
       </div>
 

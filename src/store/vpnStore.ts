@@ -1,10 +1,11 @@
 import { create } from "zustand";
-import { api, Status, Server, Settings } from "../api/daemon";
+import { api, Status, Server, Settings, SubscriptionInfo } from "../api/daemon";
 
 interface VPNStore {
   status: Status;
   servers: Server[];
   settings: Settings;
+  info: SubscriptionInfo | null;
   daemonReady: boolean;
   loading: boolean;
   connectingId: string | null;
@@ -13,12 +14,21 @@ interface VPNStore {
   fetchStatus: () => Promise<void>;
   fetchServers: () => Promise<void>;
   fetchSettings: () => Promise<void>;
+  fetchSubscription: () => Promise<void>;
   connect: (serverId: string) => Promise<void>;
+  connectFastest: () => Promise<void>;
   disconnect: () => Promise<void>;
   updateSubscription: (url: string) => Promise<void>;
   saveSettings: (s: Partial<Settings>) => Promise<void>;
   pingAll: () => Promise<void>;
   clearError: () => void;
+}
+
+/** Tauri rejects commands with a plain string; Error instances carry .message. */
+function errorText(e: unknown, fallback: string): string {
+  if (typeof e === "string") return e;
+  if (e instanceof Error && e.message) return e.message;
+  return fallback;
 }
 
 const defaultStatus: Status = {
@@ -44,6 +54,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   status: defaultStatus,
   servers: [],
   settings: defaultSettings,
+  info: null,
   daemonReady: false,
   loading: false,
   connectingId: null,
@@ -76,16 +87,40 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     }
   },
 
+  fetchSubscription: async () => {
+    try {
+      const sub = await api.getSubscription();
+      set({ info: sub.info ?? null });
+    } catch {
+      // daemon not ready yet
+    }
+  },
+
   connect: async (serverId: string) => {
     set({ connectingId: serverId, error: null });
     try {
       await api.connect(serverId);
       const status = await api.getStatus();
       set({ status, connectingId: null });
-    } catch (e: any) {
+    } catch (e: unknown) {
       set({
         connectingId: null,
-        error: e?.message ?? "Connection failed",
+        error: errorText(e, "Не удалось подключиться"),
+        status: { ...get().status, state: "disconnected" },
+      });
+    }
+  },
+
+  connectFastest: async () => {
+    set({ connectingId: "auto", error: null });
+    try {
+      await api.connectFastest();
+      const [status, servers] = await Promise.all([api.getStatus(), api.getServers()]);
+      set({ status, servers: servers ?? [], connectingId: null });
+    } catch (e: unknown) {
+      set({
+        connectingId: null,
+        error: errorText(e, "Не удалось подобрать сервер"),
         status: { ...get().status, state: "disconnected" },
       });
     }
@@ -96,22 +131,27 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     try {
       await api.disconnect();
       set({ status: defaultStatus });
-    } catch (e: any) {
-      set({ error: e?.message ?? "Disconnect failed" });
+    } catch (e: unknown) {
+      set({ error: errorText(e, "Не удалось отключиться") });
     }
   },
 
   updateSubscription: async (url: string) => {
     set({ loading: true, error: null });
     try {
-      await api.updateSubscription(url);
+      const result = await api.updateSubscription(url);
       const [servers, settings] = await Promise.all([
         api.getServers(),
         api.getSettings(),
       ]);
-      set({ servers: servers ?? [], settings, loading: false });
-    } catch (e: any) {
-      set({ loading: false, error: e?.message ?? "Failed to update subscription" });
+      set({
+        servers: servers ?? [],
+        settings,
+        info: result.info ?? get().info,
+        loading: false,
+      });
+    } catch (e: unknown) {
+      set({ loading: false, error: errorText(e, "Не удалось обновить подписку") });
       throw e;
     }
   },
@@ -124,8 +164,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       if (incoming.auto_connect !== undefined) {
         await api.setAutostart(incoming.auto_connect).catch(() => {});
       }
-    } catch (e: any) {
-      set({ error: e?.message ?? "Failed to save settings" });
+    } catch (e: unknown) {
+      set({ error: errorText(e, "Не удалось сохранить настройки") });
     }
   },
 

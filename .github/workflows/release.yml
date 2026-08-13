@@ -1,0 +1,88 @@
+name: Release
+
+# Publishing a tag builds the installer, signs it and attaches latest.json —
+# the manifest the in-app updater polls. Without that file the app never
+# learns a new version exists.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v1.1.0)"
+        required: true
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: daemon/go.sum
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Test daemon
+        working-directory: daemon
+        run: go test ./...
+
+      - name: Build daemon
+        working-directory: daemon
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -ldflags "-s -w" -o ../src-tauri/binaries/daemon-x86_64-pc-windows-msvc.exe .
+
+      - name: Verify bundled cores
+        shell: bash
+        run: |
+          # The installer ships these; a missing core means an app that
+          # launches but can never connect.
+          for core in sing-box xray; do
+            path="src-tauri/binaries/$core-x86_64-pc-windows-msvc.exe"
+            if [ ! -f "$path" ]; then
+              echo "::error::missing core binary $path"
+              exit 1
+            fi
+          done
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: RustleBoost ${{ github.event.inputs.tag || github.ref_name }}
+          releaseBody: |
+            Установщик для Windows — скачайте `.exe` ниже.
+
+            Установленные копии обновятся сами: приложение проверяет
+            обновления при запуске и раз в 6 часов.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true

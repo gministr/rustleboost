@@ -1,10 +1,15 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { RefreshCw, CheckCircle2, AlertCircle, Copy, Cpu } from "lucide-react";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { useVPNStore } from "../store/vpnStore";
 import { Settings, api, HWIDInfo } from "../api/daemon";
 
 type ReqStatus = "idle" | "loading" | "success" | "error";
+
+/** Kept in step with package.json and tauri.conf.json on every release. */
+const APP_VERSION = "1.1.0";
 
 /* ── Toggle ─────────────────────────────────────────────────────────── */
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -80,6 +85,31 @@ export default function SettingsPage() {
   const [subStatus, setSubStatus] = useState<ReqStatus>("idle");
   const [subMsg, setSubMsg] = useState("");
   const [hwid, setHwid] = useState<HWIDInfo | null>(null);
+  const [appUpdate, setAppUpdate] = useState<"idle" | "checking" | "downloading">("idle");
+  const [appUpdateMsg, setAppUpdateMsg] = useState(`RustleBoost v${APP_VERSION}`);
+
+  // Downloads and installs straight away: a user who pressed "Проверить"
+  // has already said yes to updating.
+  const checkAppUpdate = async () => {
+    setAppUpdate("checking");
+    setAppUpdateMsg("Проверяем обновления...");
+    try {
+      const update = await check();
+      if (!update?.available) {
+        setAppUpdate("idle");
+        setAppUpdateMsg(`Установлена последняя версия — v${APP_VERSION}`);
+        return;
+      }
+      setAppUpdate("downloading");
+      setAppUpdateMsg(`Загружаем v${update.version}...`);
+      await update.downloadAndInstall();
+      setAppUpdateMsg("Готово, перезапускаем...");
+      setTimeout(() => relaunch(), 1500);
+    } catch {
+      setAppUpdate("idle");
+      setAppUpdateMsg("Не удалось проверить обновления");
+    }
+  };
   const [copied, setCopied] = useState(false);
 
   useEffect(() => { setSubURL(settings.subscription_url ?? ""); }, [settings.subscription_url]);
@@ -362,6 +392,23 @@ export default function SettingsPage() {
             {[1, 3, 6, 12, 24].map(h => <option key={h} value={h}>{h}ч</option>)}
           </select>
         </Row>
+        <Row icon={icons.refresh} label="Версия приложения" sub={appUpdateMsg}>
+          <button
+            onClick={checkAppUpdate}
+            disabled={appUpdate !== "idle"}
+            style={{
+              padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600,
+              background: "var(--c-border)", border: "1px solid rgba(255,255,255,0.1)",
+              color: "var(--c-text-sub)",
+              cursor: appUpdate === "idle" ? "pointer" : "default",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {appUpdate === "checking" ? "Проверка..."
+              : appUpdate === "downloading" ? "Загрузка..."
+              : "Проверить"}
+          </button>
+        </Row>
 
         {/* ── Язык ── */}
         <Sec title="Интерфейс" />
@@ -373,7 +420,7 @@ export default function SettingsPage() {
         </Row>
 
         <p style={{ textAlign: "center", fontSize: 10, color: "var(--c-titlebar-btn)", marginTop: 24 }}>
-          RustleBoost v1.0.0 · sing-box
+          RustleBoost v{APP_VERSION} · sing-box + xray
         </p>
       </div>
 

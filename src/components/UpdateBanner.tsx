@@ -10,9 +10,17 @@ export default function UpdateBanner() {
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
-    check()
-      .then(u => { if (u?.available) setUpdate({ version: u.version, body: u.body }); })
-      .catch(() => {}); // silently ignore if no internet / not on GitHub yet
+    const look = () => {
+      check()
+        .then(u => { if (u?.available) setUpdate({ version: u.version, body: u.body }); })
+        .catch(() => {}); // no internet, or no release published yet
+    };
+
+    look();
+    // The app often stays open for days, so a start-up-only check would let a
+    // release sit unnoticed until the next restart.
+    const timer = setInterval(look, 6 * 60 * 60 * 1000);
+    return () => clearInterval(timer);
   }, []);
 
   const handleUpdate = async () => {
@@ -20,7 +28,10 @@ export default function UpdateBanner() {
     setStatus("downloading");
     try {
       const u = await check();
-      if (!u?.available) return;
+      if (!u?.available) {
+        setStatus("idle");
+        return;
+      }
       await u.downloadAndInstall();
       setStatus("done");
       setTimeout(() => relaunch(), 1500);

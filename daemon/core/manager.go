@@ -2,12 +2,15 @@ package core
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os/exec"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,22 +35,26 @@ type Stats struct {
 }
 
 type Status struct {
-	State    ConnectionState      `json:"state"`
-	Server   *subscription.Server `json:"server,omitempty"`
-	Stats    Stats                `json:"stats"`
-	Error    string               `json:"error,omitempty"`
+	State  ConnectionState      `json:"state"`
+	Server *subscription.Server `json:"server,omitempty"`
+	Stats  Stats                `json:"stats"`
+	Engine string               `json:"engine,omitempty"`
+	Error  string               `json:"error,omitempty"`
 }
 
 type Manager struct {
-	mu       sync.RWMutex
-	dataDir  string
-	store    *storage.Store
-	runner   *SingBoxRunner
-	servers  []subscription.Server
-	current  *subscription.Server
-	state    ConnectionState
+	mu          sync.RWMutex
+	dataDir     string
+	store       *storage.Store
+	singbox     *SingBoxRunner
+	xray        *XrayRunner
+	servers     []subscription.Server
+	info        subscription.Info
+	current     *subscription.Server
+	state       ConnectionState
+	engine      string
+	lastError   string
 	connectedAt time.Time
-	cancelPing  context.CancelFunc
 	subCancel   context.CancelFunc
 }
 
@@ -56,8 +63,11 @@ func NewManager(dataDir string, store *storage.Store) *Manager {
 		dataDir: dataDir,
 		store:   store,
 		state:   StateDisconnected,
+		singbox: NewSingBoxRunner(dataDir),
+		xray:    NewXrayRunner(dataDir),
 	}
-	m.runner = NewSingBoxRunner(dataDir)
+
+	m.loadCache()
 
 	settings := store.GetSettings()
 	if settings.AutoUpdate && settings.SubscriptionURL != "" {
@@ -67,6 +77,47 @@ func NewManager(dataDir string, store *storage.Store) *Manager {
 	return m
 }
 
+// ── cache ─────────────────────────────────────────────────────────────────
+
+type cachePayload struct {
+	Servers []subscription.Server `json:"servers"`
+	Info    subscription.Info     `json:"info"`
+}
+
+func (m *Manager) loadCache() {
+	data, err := m.store.LoadCache()
+	if err != nil {
+		return
+	}
+	var payload cachePayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return
+	}
+
+	m.mu.Lock()
+	m.servers = payload.Servers
+	m.info = payload.Info
+	m.mu.Unlock()
+
+	log.Printf("Loaded %d servers from cache", len(payload.Servers))
+}
+
+func (m *Manager) saveCache() {
+	m.mu.RLock()
+	payload := cachePayload{Servers: m.servers, Info: m.info}
+	m.mu.RUnlock()
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	if err := m.store.SaveCache(data); err != nil {
+		log.Printf("Save cache: %v", err)
+	}
+}
+
+// ── state ─────────────────────────────────────────────────────────────────
+
 func (m *Manager) GetStatus() Status {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -74,11 +125,13 @@ func (m *Manager) GetStatus() Status {
 	status := Status{
 		State:  m.state,
 		Server: m.current,
+		Engine: m.engine,
+		Error:  m.lastError,
 	}
 
 	if m.state == StateConnected && !m.connectedAt.IsZero() {
 		status.Stats.Uptime = int64(time.Since(m.connectedAt).Seconds())
-		if stats := m.runner.GetStats(); stats != nil {
+		if stats := m.singbox.GetStats(); stats != nil {
 			status.Stats.Upload = stats.Upload
 			status.Stats.Download = stats.Download
 		}
@@ -92,6 +145,14 @@ func (m *Manager) GetServers() []subscription.Server {
 	defer m.mu.RUnlock()
 	return m.servers
 }
+
+func (m *Manager) GetInfo() subscription.Info {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.info
+}
+
+// ── connect ───────────────────────────────────────────────────────────────
 
 func (m *Manager) Connect(serverID string) error {
 	m.mu.Lock()
@@ -119,14 +180,15 @@ func (m *Manager) Connect(serverID string) error {
 			break
 		}
 	}
-
 	if server == nil {
 		m.mu.Unlock()
 		return fmt.Errorf("server %s not found", serverID)
 	}
 
+	selected := *server
 	m.state = StateConnecting
-	m.current = server
+	m.current = &selected
+	m.lastError = ""
 	m.mu.Unlock()
 
 	settings := m.store.GetSettings()
@@ -134,46 +196,79 @@ func (m *Manager) Connect(serverID string) error {
 		TUNMode:   settings.TUNMode,
 		RouteMode: settings.RouteMode,
 		DNSMode:   settings.DNSMode,
-		LogLevel:  "warn",
 		AllowLAN:  settings.AllowLAN,
 	}
 
-	cfg, err := config.Generate(*server, opts)
+	engine := "sing-box"
+	if config.NeedsXray(selected) {
+		engine = "sing-box + xray"
+
+		xrayCfg, err := config.GenerateXray(selected, opts)
+		if err != nil {
+			return m.failConnect(fmt.Errorf("generate xray config: %w", err))
+		}
+		if err := m.xray.Start(xrayCfg); err != nil {
+			return m.failConnect(fmt.Errorf("xray: %w", err))
+		}
+		// sing-box forwards into Xray's SOCKS port; starting the tunnel
+		// before that port accepts would fail the first connections.
+		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
+			m.xray.Stop()
+			return m.failConnect(fmt.Errorf("xray did not open port %d: %w\n%s",
+				config.XraySocksPort, err, m.xray.LogTail(6)))
+		}
+	}
+
+	sbCfg, err := config.Generate(selected, opts)
 	if err != nil {
-		m.setError(err)
-		return fmt.Errorf("generate config: %w", err)
+		m.xray.Stop()
+		return m.failConnect(fmt.Errorf("generate config: %w", err))
+	}
+	if err := m.singbox.Start(sbCfg); err != nil {
+		m.xray.Stop()
+		return m.failConnect(fmt.Errorf("sing-box: %w", err))
 	}
 
-	if startErr := m.runner.Start(cfg); startErr != nil {
-		m.setError(startErr)
-		return fmt.Errorf("sing-box: %w", startErr)
-	}
-
-	// Always set Windows system proxy — in proxy mode it carries all traffic,
-	// in TUN mode it gives Windows NCSI a fast path so the tray shows
-	// "Connected" in 1-3 s instead of waiting for the next NLA polling cycle.
-	SetSystemProxy("127.0.0.1:2080")
-
-	// Warm up the VPN tunnel so Windows NCSI succeeds on its first check.
-	// Without this, Windows may show "No Internet" for 10-15 seconds while
-	// waiting for its next NLA polling cycle.
+	// The system proxy carries all traffic in proxy mode; in TUN mode it also
+	// gives Windows' connectivity check a fast path, so the tray flips to
+	// "Connected" in a couple of seconds instead of a polling cycle later.
+	SetSystemProxy(fmt.Sprintf("127.0.0.1:%d", config.MixedPort))
 	go warmupVPNTunnel()
 
 	m.mu.Lock()
 	m.state = StateConnected
+	m.engine = engine
 	m.connectedAt = time.Now()
 	m.mu.Unlock()
 
-	m.store.UpdateSettings(func(s *storage.Settings) {
-		s.LastServerID = serverID
-	})
+	m.store.UpdateSettings(func(s *storage.Settings) { s.LastServerID = serverID })
 
 	mode := "proxy"
 	if settings.TUNMode {
 		mode = "tun"
 	}
-	log.Printf("Connected to %s via %s (%s mode)", server.Name, server.Protocol, mode)
+	log.Printf("Connected to %s (%s/%s) via %s, %s mode",
+		selected.Name, selected.Protocol, selected.Transport, engine, mode)
 	return nil
+}
+
+// failConnect rolls the manager back to a clean disconnected state and keeps
+// the reason so the UI can show it instead of a bare "connection failed".
+func (m *Manager) failConnect(err error) error {
+	m.singbox.Stop()
+	m.xray.Stop()
+	ClearSystemProxy()
+
+	m.mu.Lock()
+	m.state = StateDisconnected
+	m.current = nil
+	m.engine = ""
+	m.lastError = err.Error()
+	m.connectedAt = time.Time{}
+	m.mu.Unlock()
+
+	log.Printf("Connection error: %v", err)
+	return err
 }
 
 func (m *Manager) Disconnect() error {
@@ -185,16 +280,18 @@ func (m *Manager) Disconnect() error {
 	m.state = StateDisconnecting
 	m.mu.Unlock()
 
-	if err := m.runner.Stop(); err != nil {
+	if err := m.singbox.Stop(); err != nil {
 		log.Printf("Stop sing-box: %v", err)
 	}
-
-	// Always clear system proxy on disconnect
+	if err := m.xray.Stop(); err != nil {
+		log.Printf("Stop xray: %v", err)
+	}
 	ClearSystemProxy()
 
 	m.mu.Lock()
 	m.state = StateDisconnected
 	m.current = nil
+	m.engine = ""
 	m.connectedAt = time.Time{}
 	m.mu.Unlock()
 
@@ -203,17 +300,16 @@ func (m *Manager) Disconnect() error {
 }
 
 func (m *Manager) Stop() {
-	if m.cancelPing != nil {
-		m.cancelPing()
-	}
 	if m.subCancel != nil {
 		m.subCancel()
 	}
 	m.Disconnect()
 }
 
+// ── subscription ──────────────────────────────────────────────────────────
+
 func (m *Manager) UpdateSubscription(subURL string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	settings := m.store.GetSettings()
@@ -225,48 +321,113 @@ func (m *Manager) UpdateSubscription(subURL string) error {
 	}
 
 	hwid := GetHWIDInfo()
-	headers := subscription.HWIDHeaders{
+	result, err := subscription.Fetch(ctx, subURL, subscription.HWIDHeaders{
 		HWID:  hwid.HWID,
 		OS:    hwid.OS,
 		OSVer: hwid.OSVer,
 		Model: hwid.Model,
-	}
-	servers, err := subscription.Fetch(ctx, subURL, headers)
+	})
 	if err != nil {
-		return fmt.Errorf("fetch subscription: %w", err)
+		return translateSubscriptionError(err)
 	}
 
 	m.mu.Lock()
-	// Preserve latency from existing servers
-	latencyMap := make(map[string]int)
+	// Carry measured latency across refreshes — the panel re-issues server
+	// IDs on every fetch, so match on the address instead.
+	latency := make(map[string]int, len(m.servers))
 	for _, s := range m.servers {
-		latencyMap[s.Address+":"+fmt.Sprint(s.Port)] = s.Latency
+		latency[serverKey(s)] = s.Latency
 	}
-	for i := range servers {
-		key := servers[i].Address + ":" + fmt.Sprint(servers[i].Port)
-		if lat, ok := latencyMap[key]; ok {
-			servers[i].Latency = lat
+	for i := range result.Servers {
+		if lat, ok := latency[serverKey(result.Servers[i])]; ok {
+			result.Servers[i].Latency = lat
 		}
 	}
-	m.servers = servers
+
+	// Keep the running server selected across a refresh.
+	if m.current != nil {
+		currentKey := serverKey(*m.current)
+		for i := range result.Servers {
+			if serverKey(result.Servers[i]) == currentKey {
+				result.Servers[i].ID = m.current.ID
+				break
+			}
+		}
+	}
+
+	m.servers = result.Servers
+	m.info = result.Info
 	m.mu.Unlock()
 
 	if subURL != settings.SubscriptionURL {
-		m.store.UpdateSettings(func(s *storage.Settings) {
-			s.SubscriptionURL = subURL
-		})
+		m.store.UpdateSettings(func(s *storage.Settings) { s.SubscriptionURL = subURL })
 	}
+	m.saveCache()
 
-	log.Printf("Subscription updated: %d servers", len(servers))
+	log.Printf("Subscription updated: %d servers", len(result.Servers))
 	return nil
 }
+
+// serverKey identifies a node across refreshes, independent of its random ID.
+func serverKey(s subscription.Server) string {
+	return fmt.Sprintf("%s|%s:%d|%s", s.Name, s.Address, s.Port, s.Transport)
+}
+
+// translateSubscriptionError turns panel signalling into text a user can act on.
+func translateSubscriptionError(err error) error {
+	switch {
+	case errors.Is(err, subscription.ErrHWIDMaxDevices):
+		return fmt.Errorf("достигнут лимит устройств для этой подписки — отвяжите одно из устройств в личном кабинете")
+	case errors.Is(err, subscription.ErrHWIDNotSupported):
+		return fmt.Errorf("панель не приняла идентификатор устройства — обновите приложение или обратитесь в поддержку")
+	case errors.Is(err, subscription.ErrHWIDRejected):
+		return fmt.Errorf("подписка не найдена — проверьте ссылку подписки")
+	case errors.Is(err, subscription.ErrPlaceholderOnly):
+		return fmt.Errorf("подписка не вернула ни одного сервера — проверьте её статус в личном кабинете")
+	}
+	return fmt.Errorf("не удалось обновить подписку: %w", err)
+}
+
+func (m *Manager) startAutoUpdate() {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.subCancel = cancel
+
+	go func() {
+		settings := m.store.GetSettings()
+		interval := time.Duration(settings.UpdateInterval) * time.Hour
+		if interval < time.Hour {
+			interval = 12 * time.Hour
+		}
+
+		if err := m.UpdateSubscription(""); err != nil {
+			log.Printf("Initial subscription update failed: %v", err)
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := m.UpdateSubscription(""); err != nil {
+					log.Printf("Auto subscription update failed: %v", err)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// ── latency ───────────────────────────────────────────────────────────────
 
 func (m *Manager) PingServer(serverID string) (int, error) {
 	m.mu.RLock()
 	var target *subscription.Server
 	for i := range m.servers {
 		if m.servers[i].ID == serverID {
-			target = &m.servers[i]
+			s := m.servers[i]
+			target = &s
 			break
 		}
 	}
@@ -296,9 +457,8 @@ func (m *Manager) PingAll() {
 	copy(servers, m.servers)
 	m.mu.RUnlock()
 
-	var wg sync.WaitGroup
 	results := make([]int, len(servers))
-
+	var wg sync.WaitGroup
 	for i, s := range servers {
 		wg.Add(1)
 		go func(idx int, srv subscription.Server) {
@@ -309,55 +469,53 @@ func (m *Manager) PingAll() {
 	wg.Wait()
 
 	m.mu.Lock()
+	byID := make(map[string]int, len(servers))
+	for i, s := range servers {
+		byID[s.ID] = results[i]
+	}
 	for i := range m.servers {
-		for j, s := range servers {
-			if m.servers[i].ID == s.ID {
-				m.servers[i].Latency = results[j]
-				break
-			}
+		if lat, ok := byID[m.servers[i].ID]; ok {
+			m.servers[i].Latency = lat
 		}
 	}
 	m.mu.Unlock()
 }
 
-func (m *Manager) startAutoUpdate() {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.subCancel = cancel
-
-	go func() {
-		settings := m.store.GetSettings()
-		interval := time.Duration(settings.UpdateInterval) * time.Hour
-		if interval < time.Hour {
-			interval = 12 * time.Hour
+// FastestServerID returns the reachable server with the lowest latency,
+// measuring first when no ping data exists yet.
+func (m *Manager) FastestServerID() (string, error) {
+	m.mu.RLock()
+	measured := false
+	for _, s := range m.servers {
+		if s.Latency > 0 {
+			measured = true
+			break
 		}
+	}
+	empty := len(m.servers) == 0
+	m.mu.RUnlock()
 
-		// Initial update
-		if err := m.UpdateSubscription(""); err != nil {
-			log.Printf("Initial subscription update failed: %v", err)
+	if empty {
+		return "", fmt.Errorf("нет доступных серверов")
+	}
+	if !measured {
+		m.PingAll()
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	candidates := make([]subscription.Server, 0, len(m.servers))
+	for _, s := range m.servers {
+		if s.Latency > 0 {
+			candidates = append(candidates, s)
 		}
-
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				if err := m.UpdateSubscription(""); err != nil {
-					log.Printf("Auto subscription update failed: %v", err)
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-}
-
-func (m *Manager) setError(err error) {
-	m.mu.Lock()
-	m.state = StateDisconnected
-	m.current = nil
-	m.mu.Unlock()
-	log.Printf("Connection error: %v", err)
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("ни один сервер не отвечает — проверьте интернет-соединение")
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Latency < candidates[j].Latency })
+	return candidates[0].ID, nil
 }
 
 func pingTCP(host string, port int) int {
@@ -371,19 +529,32 @@ func pingTCP(host string, port int) int {
 	return int(time.Since(start).Milliseconds())
 }
 
-// GetHWID returns the device HWID info for display in UI
-func (m *Manager) GetHWID() HWIDInfo {
-	return GetHWIDInfo()
+// waitForPort blocks until a local port accepts connections.
+func waitForPort(port int, timeout time.Duration) error {
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout after %s", timeout)
 }
 
-// warmupVPNTunnel pre-establishes the VPN connection and then sets the
-// RustleBoost adapter's Windows network category to Private.
-// This changes the tray status from "Без доступа к Интернету" to
-// "Подключение установлено" without waiting for Windows NLA re-check.
+// GetHWID returns the device HWID info for display in UI
+func (m *Manager) GetHWID() HWIDInfo { return GetHWIDInfo() }
+
+// warmupVPNTunnel pre-establishes the tunnel and marks the adapter as a
+// Private network, so Windows reports "Connected" rather than sitting on
+// "No Internet" until its next NLA re-check.
 func warmupVPNTunnel() {
-	// Wait until sing-box mixed port is accepting connections (up to 3s)
+	proxy := fmt.Sprintf("127.0.0.1:%d", config.MixedPort)
+
 	for i := 0; i < 30; i++ {
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:2080", 100*time.Millisecond)
+		conn, err := net.DialTimeout("tcp", proxy, 100*time.Millisecond)
 		if err == nil {
 			conn.Close()
 			break
@@ -391,7 +562,7 @@ func warmupVPNTunnel() {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	proxyURL, err := url.Parse("http://127.0.0.1:2080")
+	proxyURL, err := url.Parse("http://" + proxy)
 	if err != nil {
 		return
 	}
@@ -399,16 +570,13 @@ func warmupVPNTunnel() {
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
 		Timeout:   8 * time.Second,
 	}
-	resp, err := client.Head("http://connectivitycheck.gstatic.com/generate_204")
-	if err == nil {
+	if resp, err := client.Head("http://connectivitycheck.gstatic.com/generate_204"); err == nil {
 		resp.Body.Close()
 		log.Println("[warmup] VPN tunnel warmed up successfully")
 	} else {
 		log.Printf("[warmup] warmup failed (non-critical): %v", err)
 	}
 
-	// Mark the RustleBoost adapter as a Private network so Windows NLA
-	// shows "Подключение установлено" instead of "Без доступа к Интернету".
 	setNetworkCategoryPrivate()
 }
 

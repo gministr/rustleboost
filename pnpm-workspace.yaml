@@ -1,2 +1,5 @@
+# esbuild and the Tauri CLI ship native binaries and need their install
+# scripts to run; pnpm blocks build scripts unless they are allowed here.
 allowBuilds:
-  esbuild: set this to true or false
+  esbuild: true
+  "@tauri-apps/cli": true

@@ -11,15 +11,24 @@ import NavBar from "./components/NavBar";
 import UpdateBanner from "./components/UpdateBanner";
 
 export default function App() {
-  const { fetchStatus, fetchServers, fetchSettings, settings } = useVPNStore();
+  const { fetchStatus, fetchServers, fetchSettings, fetchSubscription, settings } = useVPNStore();
   const isDark = useThemeStore(s => s.isDark);
 
   useEffect(() => {
     fetchSettings();
     fetchServers();
     fetchStatus();
-    const interval = setInterval(fetchStatus, 2000);
-    return () => clearInterval(interval);
+    fetchSubscription();
+
+    const status = setInterval(fetchStatus, 2000);
+    // Traffic and expiry only move when the daemon refreshes the
+    // subscription, so a slow poll is enough to keep them current.
+    const subscription = setInterval(fetchSubscription, 60_000);
+
+    return () => {
+      clearInterval(status);
+      clearInterval(subscription);
+    };
   }, []);
 
   const hasSubscription = !!settings.subscription_url;
