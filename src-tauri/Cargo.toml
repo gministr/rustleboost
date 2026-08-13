@@ -1,6 +1,6 @@
 [package]
 name = "rustleboost"
-version = "1.1.0"
+version = "1.1.1"
 description = "RustleBoost - VPN Client"
 authors = ["RustleBoost"]
 edition = "2021"

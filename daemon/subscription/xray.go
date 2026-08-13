@@ -167,6 +167,16 @@ func joinPath(raw, segment string) (string, error) {
 
 // serverFromOutbound turns one Xray outbound into a Server. It reports false
 // for the non-proxy outbounds every config carries (freedom, blackhole, dns).
+//
+// The outbound is kept in two forms. Params is a flat, protocol-agnostic map
+// good enough for sing-box to build a native outbound directly — no local
+// core in between — for every transport sing-box implements itself. Outbound
+// is the original Xray JSON, used only as a fallback for transports sing-box
+// does not have (XHTTP, mKCP): those still route through Xray via a local
+// SOCKS bridge. Routing a node through Xray when sing-box could carry it
+// alone is not free — it is one more process that can be blocked by a
+// firewall or fail to resolve DNS on a given machine — so every node that
+// can skip it does.
 func serverFromOutbound(raw json.RawMessage, remarks string) (Server, bool) {
 	var ob struct {
 		Tag      string `json:"tag"`
@@ -175,32 +185,48 @@ func serverFromOutbound(raw json.RawMessage, remarks string) (Server, bool) {
 			VNext []struct {
 				Address string `json:"address"`
 				Port    int    `json:"port"`
+				Users   []struct {
+					ID         string `json:"id"`
+					Flow       string `json:"flow"`
+					Encryption string `json:"encryption"`
+				} `json:"users"`
 			} `json:"vnext"`
 			Servers []struct {
-				Address string `json:"address"`
-				Port    int    `json:"port"`
+				Address  string `json:"address"`
+				Port     int    `json:"port"`
+				Password string `json:"password"`
+				Method   string `json:"method"`
 			} `json:"servers"`
 		} `json:"settings"`
-		StreamSettings struct {
-			Network  string `json:"network"`
-			Security string `json:"security"`
-		} `json:"streamSettings"`
+		StreamSettings streamSettings `json:"streamSettings"`
 	}
 	if err := json.Unmarshal(raw, &ob); err != nil {
 		return Server{}, false
 	}
 
-	switch strings.ToLower(ob.Protocol) {
+	protocol := strings.ToLower(ob.Protocol)
+	switch protocol {
 	case "vless", "vmess", "trojan", "shadowsocks":
 	default:
 		return Server{}, false
 	}
 
 	address, port := "", 0
+	params := map[string]string{}
+
 	if len(ob.Settings.VNext) > 0 {
-		address, port = ob.Settings.VNext[0].Address, ob.Settings.VNext[0].Port
+		v := ob.Settings.VNext[0]
+		address, port = v.Address, v.Port
+		if len(v.Users) > 0 {
+			params["uuid"] = v.Users[0].ID
+			params["flow"] = v.Users[0].Flow
+			params["encryption"] = v.Users[0].Encryption
+		}
 	} else if len(ob.Settings.Servers) > 0 {
-		address, port = ob.Settings.Servers[0].Address, ob.Settings.Servers[0].Port
+		s := ob.Settings.Servers[0]
+		address, port = s.Address, s.Port
+		params["password"] = s.Password
+		params["method"] = s.Method
 	}
 	if address == "" {
 		return Server{}, false
@@ -211,13 +237,16 @@ func serverFromOutbound(raw json.RawMessage, remarks string) (Server, bool) {
 		return Server{}, false
 	}
 
-	network := ob.StreamSettings.Network
-	if network == "" {
-		network = "tcp"
-	}
-	security := ob.StreamSettings.Security
-	if security == "" {
-		security = "none"
+	network := firstNonEmpty(ob.StreamSettings.Network, "tcp")
+	security := firstNonEmpty(ob.StreamSettings.Security, "none")
+	extractStreamParams(params, network, security, ob.StreamSettings, address)
+
+	engine := EngineXray
+	// Only VLESS/Trojan/Shadowsocks have a native builder below; VMess keeps
+	// the Xray path unconditionally rather than risk an under-tested cipher
+	// negotiation.
+	if protocol != "vmess" && singBoxNativeTransport(network) {
+		engine = EngineSingBox
 	}
 
 	name := remarks
@@ -237,9 +266,71 @@ func serverFromOutbound(raw json.RawMessage, remarks string) (Server, bool) {
 		Address:   address,
 		Port:      port,
 		Latency:   -1,
-		Engine:    EngineXray,
+		Engine:    engine,
+		Params:    params,
 		Outbound:  outbound,
 	}, true
+}
+
+// singBoxNativeTransport reports whether sing-box's own VLESS/Trojan/
+// Shadowsocks outbound implements this transport. Verified directly against
+// the bundled binary with `sing-box check`, not assumed from documentation:
+// XHTTP and mKCP are rejected with "unknown transport type"; everything
+// listed here is accepted.
+func singBoxNativeTransport(network string) bool {
+	switch network {
+	case "", "tcp", "ws", "grpc", "httpupgrade", "http", "h2", "quic":
+		return true
+	default:
+		return false
+	}
+}
+
+// extractStreamParams flattens the decoded Xray streamSettings into the same
+// param keys buildStream (URI path) produces, so the sing-box native builder
+// in the config package can consume either source uniformly.
+func extractStreamParams(params map[string]string, network, security string, s streamSettings, fallbackSNI string) {
+	sni := fallbackSNI
+	fp := ""
+
+	switch security {
+	case "reality":
+		if s.RealitySettings != nil {
+			sni = firstNonEmpty(s.RealitySettings.ServerName, sni)
+			fp = s.RealitySettings.Fingerprint
+			params["pbk"] = s.RealitySettings.PublicKey
+			params["sid"] = s.RealitySettings.ShortID
+			params["spx"] = s.RealitySettings.SpiderX
+		}
+	case "tls":
+		if s.TLSSettings != nil {
+			sni = firstNonEmpty(s.TLSSettings.ServerName, sni)
+			fp = s.TLSSettings.Fingerprint
+			params["alpn"] = strings.Join(s.TLSSettings.ALPN, ",")
+			if s.TLSSettings.AllowInsecure {
+				params["insecure"] = "1"
+			}
+		}
+	}
+	params["sni"] = sni
+	params["fp"] = fp
+
+	switch network {
+	case "ws":
+		if s.WSSettings != nil {
+			params["path"] = s.WSSettings.Path
+			params["host"] = firstNonEmpty(s.WSSettings.Headers["Host"], s.WSSettings.Host)
+		}
+	case "grpc":
+		if s.GRPCSettings != nil {
+			params["serviceName"] = s.GRPCSettings.ServiceName
+		}
+	case "httpupgrade":
+		if s.HTTPUpgradeSettings != nil {
+			params["path"] = s.HTTPUpgradeSettings.Path
+			params["host"] = s.HTTPUpgradeSettings.Host
+		}
+	}
 }
 
 // retagOutbound rewrites an outbound's tag to ProxyTag so the routing rules in
@@ -438,6 +529,7 @@ func parseVLESS(raw string) (Server, error) {
 	}
 	port, _ := strconv.Atoi(u.Port())
 	q := u.Query()
+	q.Set("uuid", u.User.Username())
 
 	outbound := map[string]any{
 		"tag":      ProxyTag,
@@ -528,6 +620,7 @@ func parseTrojan(raw string) (Server, error) {
 	if q.Get("security") == "" {
 		q.Set("security", "tls")
 	}
+	q.Set("password", u.User.Username())
 
 	outbound := map[string]any{
 		"tag":      ProxyTag,
@@ -562,6 +655,8 @@ func parseShadowsocks(raw string) (Server, error) {
 
 	port, _ := strconv.Atoi(u.Port())
 	q := u.Query()
+	q.Set("method", method)
+	q.Set("password", password)
 
 	outbound := map[string]any{
 		"tag":      ProxyTag,
@@ -588,6 +683,12 @@ func finishServer(raw string, u *url.URL, port int, q url.Values, protocol strin
 	return assembleServer(raw, name, u.Hostname(), port, protocol, q, outbound)
 }
 
+// assembleServer is the shared exit point for every URI-shaped proxy scheme.
+// Engine and Params follow the same rule as the /v2ray-json path in
+// serverFromOutbound: sing-box carries the node natively whenever it
+// implements the transport, and Xray is used only where sing-box has no
+// equivalent (XHTTP, mKCP) or for VMess, whose cipher negotiation is not
+// exercised by the native path.
 func assembleServer(raw, name, address string, port int, protocol string, q url.Values, outbound map[string]any) (Server, error) {
 	if address == "" || port <= 0 {
 		return Server{}, fmt.Errorf("%s: missing address or port", protocol)
@@ -604,6 +705,20 @@ func assembleServer(raw, name, address string, port int, protocol string, q url.
 		transport = "xhttp"
 	}
 
+	engine := EngineXray
+	if protocol != "vmess" && singBoxNativeTransport(transport) {
+		engine = EngineSingBox
+	}
+
+	params := map[string]string{
+		"uuid": q.Get("uuid"), "password": q.Get("password"), "method": q.Get("method"),
+		"flow": q.Get("flow"), "security": q.Get("security"),
+		"sni": q.Get("sni"), "fp": q.Get("fp"),
+		"pbk": q.Get("pbk"), "sid": q.Get("sid"), "alpn": q.Get("alpn"),
+		"path": q.Get("path"), "host": q.Get("host"), "serviceName": q.Get("serviceName"),
+		"insecure": q.Get("insecure"),
+	}
+
 	return Server{
 		ID:        newID(),
 		Name:      name,
@@ -616,7 +731,8 @@ func assembleServer(raw, name, address string, port int, protocol string, q url.
 		Port:      port,
 		Latency:   -1,
 		RawURI:    raw,
-		Engine:    EngineXray,
+		Engine:    engine,
+		Params:    params,
 		Outbound:  encoded,
 	}, nil
 }

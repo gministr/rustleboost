@@ -145,6 +145,19 @@ type RealityConfig struct {
 	ShortID   string `json:"short_id"`
 }
 
+// TransportConfig covers the transports sing-box implements natively.
+// Field names and shapes were verified directly against the bundled binary
+// (`sing-box check`) rather than assumed from Xray's schema, which differs:
+// ws needs Host under "headers", not a bare "host" field, and grpc's field is
+// "service_name", not "serviceName" — both fail as "unknown field" otherwise,
+// because sing-box's decoder rejects unrecognized JSON keys outright.
+type TransportConfig struct {
+	Type        string            `json:"type"`
+	Path        string            `json:"path,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	ServiceName string            `json:"service_name,omitempty"`
+}
+
 type Options struct {
 	TUNMode   bool
 	RouteMode string // "all" | "ru" | "cn"
@@ -504,9 +517,15 @@ func buildProxyOutbound(server subscription.Server) (interface{}, error) {
 		}, nil
 	}
 
-	// A subscription published as a sing-box config supplies its outbound
-	// ready-made; pass it through rather than rebuilding it field by field.
-	if len(server.Outbound) > 0 {
+	p := server.Params
+
+	// A subscription published AS a sing-box config supplies its outbound
+	// ready-made — pass it through rather than rebuilding it field by field.
+	// That path never populates Params, which is how it is told apart from a
+	// Remnawave /v2ray-json node: those carry an Xray-shaped Outbound (wrong
+	// field names for sing-box) alongside Params extracted for exactly this
+	// native path.
+	if len(p) == 0 && len(server.Outbound) > 0 {
 		var raw interface{}
 		if err := json.Unmarshal(server.Outbound, &raw); err != nil {
 			return nil, fmt.Errorf("decode outbound for %q: %w", server.Name, err)
@@ -514,8 +533,13 @@ func buildProxyOutbound(server subscription.Server) (interface{}, error) {
 		return raw, nil
 	}
 
-	p := server.Params
 	switch server.Protocol {
+	case "VLESS":
+		return buildVLESS(server, p), nil
+	case "Trojan":
+		return buildTrojan(server, p), nil
+	case "Shadowsocks":
+		return buildShadowsocks(server, p), nil
 	case "Hysteria2":
 		return buildHysteria2(server, p), nil
 	case "TUIC":
@@ -524,6 +548,121 @@ func buildProxyOutbound(server subscription.Server) (interface{}, error) {
 		return buildNaive(server, p), nil
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", server.Protocol)
+	}
+}
+
+func buildTLS(p map[string]string) *TLSConfig {
+	switch p["security"] {
+	case "reality":
+		return &TLSConfig{
+			Enabled:    true,
+			ServerName: p["sni"],
+			UTLS:       &UTLSConfig{Enabled: true, Fingerprint: coalesce(p["fp"], "chrome")},
+			Reality: &RealityConfig{
+				Enabled:   true,
+				PublicKey: p["pbk"],
+				ShortID:   p["sid"],
+			},
+		}
+	case "tls":
+		return &TLSConfig{
+			Enabled:    true,
+			ServerName: p["sni"],
+			ALPN:       splitCSV(p["alpn"]),
+			UTLS:       &UTLSConfig{Enabled: true, Fingerprint: coalesce(p["fp"], "chrome")},
+			Insecure:   p["insecure"] == "1",
+		}
+	default:
+		return nil
+	}
+}
+
+func buildTransport(network string, p map[string]string) *TransportConfig {
+	switch network {
+	case "ws":
+		t := &TransportConfig{Type: "ws", Path: coalesce(p["path"], "/")}
+		if host := p["host"]; host != "" {
+			t.Headers = map[string]string{"Host": host}
+		}
+		return t
+	case "grpc":
+		return &TransportConfig{Type: "grpc", ServiceName: p["serviceName"]}
+	case "httpupgrade":
+		return &TransportConfig{Type: "httpupgrade", Path: coalesce(p["path"], "/")}
+	case "http", "h2":
+		t := &TransportConfig{Type: "http", Path: coalesce(p["path"], "/")}
+		if host := p["host"]; host != "" {
+			t.Headers = map[string]string{"Host": host}
+		}
+		return t
+	default:
+		return nil
+	}
+}
+
+type VLESSOutbound struct {
+	Type       string           `json:"type"`
+	Tag        string           `json:"tag"`
+	Server     string           `json:"server"`
+	ServerPort int              `json:"server_port"`
+	UUID       string           `json:"uuid"`
+	Flow       string           `json:"flow,omitempty"`
+	TLS        *TLSConfig       `json:"tls,omitempty"`
+	Transport  *TransportConfig `json:"transport,omitempty"`
+}
+
+func buildVLESS(server subscription.Server, p map[string]string) interface{} {
+	return VLESSOutbound{
+		Type: "vless", Tag: "proxy",
+		Server: server.Address, ServerPort: server.Port,
+		UUID:      p["uuid"],
+		Flow:      p["flow"],
+		TLS:       buildTLS(p),
+		Transport: buildTransport(server.Transport, p),
+	}
+}
+
+type TrojanOutbound struct {
+	Type       string           `json:"type"`
+	Tag        string           `json:"tag"`
+	Server     string           `json:"server"`
+	ServerPort int              `json:"server_port"`
+	Password   string           `json:"password"`
+	TLS        *TLSConfig       `json:"tls,omitempty"`
+	Transport  *TransportConfig `json:"transport,omitempty"`
+}
+
+func buildTrojan(server subscription.Server, p map[string]string) interface{} {
+	tls := buildTLS(p)
+	if tls == nil {
+		// Trojan is defined on top of TLS; a node with no explicit tls/reality
+		// block still means "plain TLS to this host", not "no TLS at all".
+		tls = &TLSConfig{Enabled: true, ServerName: coalesce(p["sni"], server.Address)}
+	}
+	return TrojanOutbound{
+		Type: "trojan", Tag: "proxy",
+		Server: server.Address, ServerPort: server.Port,
+		Password:  p["password"],
+		TLS:       tls,
+		Transport: buildTransport(server.Transport, p),
+	}
+}
+
+type ShadowsocksOutbound struct {
+	Type       string `json:"type"`
+	Tag        string `json:"tag"`
+	Server     string `json:"server"`
+	ServerPort int    `json:"server_port"`
+	Method     string `json:"method"`
+	Password   string `json:"password"`
+}
+
+func buildShadowsocks(server subscription.Server, p map[string]string) interface{} {
+	return ShadowsocksOutbound{
+		Type: "shadowsocks", Tag: "proxy",
+		Server: server.Address, ServerPort: server.Port,
+		Method:   p["method"],
+		Password: p["password"],
 	}
 }
 

@@ -33,35 +33,27 @@ func parseOne(t *testing.T, uri string) subscription.Server {
 	return servers[0]
 }
 
+// sing-box has its own native VLESS/gRPC/Reality implementation, verified
+// directly against the bundled binary (see buildTransport / buildTLS in
+// generator.go). A node using it does not need Xray running at all — one
+// fewer process that can be blocked by a firewall or fail its own DNS
+// lookup, which is exactly the failure mode that surfaced when every node
+// was forced through Xray regardless of transport.
 func TestParseGRPCReality(t *testing.T) {
 	s := parseOne(t, grpcRealityURI)
 
 	if s.Transport != "grpc" || s.Security != "reality" {
 		t.Errorf("transport/security = %q/%q, want grpc/reality", s.Transport, s.Security)
 	}
-	if s.Engine != subscription.EngineXray {
-		t.Errorf("engine = %q, want %q", s.Engine, subscription.EngineXray)
+	if s.Engine != subscription.EngineSingBox {
+		t.Errorf("engine = %q, want %q (sing-box implements grpc+reality natively)", s.Engine, subscription.EngineSingBox)
 	}
 	if s.Country != "Poland" {
 		t.Errorf("country = %q, want Poland (from flag emoji)", s.Country)
 	}
 
-	var ob struct {
-		Stream struct {
-			GRPC struct {
-				ServiceName string `json:"serviceName"`
-			} `json:"grpcSettings"`
-			Reality struct {
-				PublicKey string `json:"publicKey"`
-				ShortID   string `json:"shortId"`
-			} `json:"realitySettings"`
-		} `json:"streamSettings"`
-	}
-	if err := json.Unmarshal(s.Outbound, &ob); err != nil {
-		t.Fatalf("decode outbound: %v", err)
-	}
-	if ob.Stream.Reality.PublicKey != "TEST_PUBLIC_KEY" || ob.Stream.Reality.ShortID != "abcd1234" {
-		t.Errorf("reality settings lost: %+v", ob.Stream.Reality)
+	if s.Params["pbk"] != "TEST_PUBLIC_KEY" || s.Params["sid"] != "abcd1234" {
+		t.Errorf("reality params lost: pbk=%q sid=%q", s.Params["pbk"], s.Params["sid"])
 	}
 }
 
@@ -117,6 +109,46 @@ func TestSingBoxDelegatesToXray(t *testing.T) {
 	}
 	if out.ServerPort != XraySocksPort || out.Tag != "proxy" {
 		t.Errorf("socks outbound = %+v", out)
+	}
+}
+
+// A node sing-box implements natively must never touch Xray: routing it
+// through the SOCKS bridge anyway is what left every server unreachable on a
+// machine where something (firewall, DNS, whatever) breaks the Xray process
+// specifically, even though sing-box's own tunnel worked fine there.
+func TestGRPCRealityBuildsWithoutXray(t *testing.T) {
+	s := parseOne(t, grpcRealityURI)
+
+	if NeedsXray(s) {
+		t.Fatal("NeedsXray = true for a grpc+reality node sing-box supports natively")
+	}
+
+	cfg, err := Generate(s, Options{TUNMode: true, RouteMode: "all"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	out, ok := cfg.Outbounds[0].(VLESSOutbound)
+	if !ok {
+		t.Fatalf("proxy outbound is %T, want VLESSOutbound", cfg.Outbounds[0])
+	}
+	if out.UUID != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("uuid = %q", out.UUID)
+	}
+	if out.TLS == nil || out.TLS.Reality == nil {
+		t.Fatal("no reality block")
+	}
+	if out.TLS.Reality.PublicKey != "TEST_PUBLIC_KEY" || out.TLS.Reality.ShortID != "abcd1234" {
+		t.Errorf("reality = %+v", out.TLS.Reality)
+	}
+	if out.Transport == nil || out.Transport.Type != "grpc" {
+		t.Fatalf("transport = %+v, want grpc", out.Transport)
+	}
+
+	for _, ob := range cfg.Outbounds {
+		if _, isSocks := ob.(SocksOutbound); isSocks {
+			t.Fatal("a socks bridge to Xray was generated for a native-only node")
+		}
 	}
 }
 
