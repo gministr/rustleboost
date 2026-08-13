@@ -10,7 +10,7 @@ import { useT, formatHours, Language } from "../i18n";
 type ReqStatus = "idle" | "loading" | "success" | "error";
 
 /** Kept in step with package.json and tauri.conf.json on every release. */
-const APP_VERSION = "1.2.1";
+const APP_VERSION = "1.3.0";
 
 /* ── Toggle ─────────────────────────────────────────────────────────── */
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {

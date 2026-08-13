@@ -45,31 +45,48 @@ type LogConfig struct {
 }
 
 type ExperimentalConfig struct {
-	ClashAPI *ClashAPIConfig `json:"clash_api,omitempty"`
+	ClashAPI  *ClashAPIConfig  `json:"clash_api,omitempty"`
+	CacheFile *CacheFileConfig `json:"cache_file,omitempty"`
 }
 
 type ClashAPIConfig struct {
 	ExternalController string `json:"external_controller"`
 }
 
+// CacheFileConfig persists the FakeIP mapping. Without it every reconnect
+// hands out fresh placeholder addresses while applications still hold the
+// previous ones, which strands their open connections.
+type CacheFileConfig struct {
+	Enabled     bool   `json:"enabled"`
+	Path        string `json:"path,omitempty"`
+	StoreFakeIP bool   `json:"store_fakeip,omitempty"`
+}
+
 type DNSConfig struct {
-	Servers []DNSServer `json:"servers"`
-	Rules   []DNSRule   `json:"rules,omitempty"`
-	Final   string      `json:"final"`
+	Servers          []DNSServer `json:"servers"`
+	Rules            []DNSRule   `json:"rules,omitempty"`
+	Final            string      `json:"final"`
+	IndependentCache bool        `json:"independent_cache,omitempty"`
 }
 
 type DNSServer struct {
 	Tag        string `json:"tag"`
-	Type       string `json:"type"` // udp | tcp | tls | https | quic | local
+	Type       string `json:"type"` // udp | tcp | tls | https | quic | local | fakeip
 	Server     string `json:"server,omitempty"`
 	ServerPort int    `json:"server_port,omitempty"`
 	Path       string `json:"path,omitempty"`
+	// FakeIP pools. sing-box 1.12 replaced the old top-level "fakeip" block
+	// with these fields on a server of type "fakeip".
+	Inet4Range string `json:"inet4_range,omitempty"`
+	Inet6Range string `json:"inet6_range,omitempty"`
 }
 
 type DNSRule struct {
 	IPIsPrivate  *bool    `json:"ip_is_private,omitempty"`
 	Domain       []string `json:"domain,omitempty"`
 	DomainSuffix []string `json:"domain_suffix,omitempty"`
+	ProcessName  []string `json:"process_name,omitempty"`
+	QueryType    []string `json:"query_type,omitempty"`
 	Server       string   `json:"server"`
 }
 
@@ -165,6 +182,10 @@ type Options struct {
 	LogLevel   string
 	AllowLAN   bool
 	RouterMode string // "auto" | "singbox" | "xray"
+	// ServerIPs are the node's addresses resolved before the tunnel came up.
+	// They become direct routes so the proxy leg cannot be swallowed by the
+	// tunnel it is carrying, without relying on process matching.
+	ServerIPs []string
 }
 
 // Router mode values, mirrored from storage.Settings.RouterMode.
@@ -382,7 +403,8 @@ func Generate(server subscription.Server, opts Options) (*SingBoxConfig, error) 
 	return &SingBoxConfig{
 		Log: &LogConfig{Level: level},
 		Experimental: &ExperimentalConfig{
-			ClashAPI: &ClashAPIConfig{ExternalController: "127.0.0.1:9090"},
+			ClashAPI:  &ClashAPIConfig{ExternalController: "127.0.0.1:9090"},
+			CacheFile: &CacheFileConfig{Enabled: true, Path: "cache.db", StoreFakeIP: true},
 		},
 		DNS:      buildDNS(server, opts),
 		Inbounds: buildInbounds(opts),
@@ -433,31 +455,67 @@ func bypassSuffixes(mode string) []string {
 	return nil
 }
 
+// buildDNS resolves names through FakeIP rather than a real upstream.
+//
+// The previous design sent every lookup to DNS-over-HTTPS on 1.1.1.1 and
+// routed it through the tunnel. On a network where that endpoint is blocked
+// — common enough for Russian ISPs — every single query died on a ten second
+// timeout, so no name resolved and nothing loaded, while the tunnel itself
+// was demonstrably up and carrying the readiness probe. Depending on one
+// hardcoded public resolver put a single, easily blocked point of failure in
+// front of the entire connection.
+//
+// FakeIP removes that dependency completely: an A/AAAA query is answered
+// instantly from a reserved range with no network traffic at all, the
+// original domain travels to the proxy, and the node on the far side does
+// the real resolution. This is what the panel's own sing-box template does.
+//
+// Real resolution is still needed in three places, all of which must bypass
+// FakeIP or the connection cannot be established at all:
+//   - the node's own hostname, or the tunnel could never come up;
+//   - Xray's lookups, since it dials the node itself and a fake address
+//     would send it back into the tunnel it is supposed to be carrying;
+//   - domains routed direct, which need an address the direct outbound can
+//     actually connect to.
 func buildDNS(server subscription.Server, opts Options) *DNSConfig {
 	boolTrue := true
 	var rules []DNSRule
 
-	// The node's own hostname must resolve without the tunnel, or the tunnel
-	// can never come up in the first place.
+	if opts.TUNMode {
+		rules = append(rules, DNSRule{
+			ProcessName: []string{"xray.exe", "xray"},
+			Server:      "local-dns",
+		})
+	}
 	if server.Address != "" && net.ParseIP(server.Address) == nil {
 		rules = append(rules, DNSRule{Domain: []string{server.Address}, Server: "local-dns"})
 	}
 	if suffixes := bypassSuffixes(opts.RouteMode); len(suffixes) > 0 {
 		rules = append(rules, DNSRule{DomainSuffix: suffixes, Server: "local-dns"})
 	}
-	rules = append(rules, DNSRule{IPIsPrivate: &boolTrue, Server: "local-dns"})
+	rules = append(rules,
+		DNSRule{IPIsPrivate: &boolTrue, Server: "local-dns"},
+		DNSRule{QueryType: []string{"A", "AAAA"}, Server: "fakeip-dns"},
+	)
 
 	return &DNSConfig{
 		Servers: []DNSServer{
-			{Tag: "proxy-dns", Type: "https", Server: "1.1.1.1", ServerPort: 443, Path: "/dns-query"},
-			// The system resolver bootstraps the node's hostname before the
-			// tunnel exists. A hardcoded public resolver is the wrong choice
-			// here: it is exactly the kind of address that gets throttled on
-			// the networks this client is meant to work on.
+			{
+				Tag:        "fakeip-dns",
+				Type:       "fakeip",
+				Inet4Range: "198.18.0.0/15",
+				Inet6Range: "fc00::/18",
+			},
+			// The system resolver, not a fixed public one: on a censored
+			// network the ISP's own resolver is the address most likely to
+			// answer, and it is only used for the few lookups above.
 			{Tag: "local-dns", Type: "local"},
 		},
 		Rules: rules,
-		Final: "proxy-dns",
+		// Anything that is not an address lookup (PTR, HTTPS records, SRV)
+		// has no FakeIP equivalent and goes to the real resolver.
+		Final:            "local-dns",
+		IndependentCache: true,
 	}
 }
 
@@ -480,25 +538,36 @@ func buildRoute(server subscription.Server, opts Options) RouteConfig {
 		)
 
 		// Everything the cores themselves send must bypass the tunnel,
-		// otherwise the proxy leg is routed back into TUN and deadlocks. This
-		// covers nodes addressed by bare IP, which a domain rule cannot match.
+		// otherwise the proxy leg is routed back into TUN and deadlocks.
 		rules = append(rules, RouteRule{
 			ProcessName: []string{"xray.exe", "sing-box.exe"},
 			Outbound:    "direct",
 		})
 
-		if server.Address != "" {
-			if net.ParseIP(server.Address) != nil {
-				rules = append(rules, RouteRule{
-					IPCIDR:   []string{hostRoute(server.Address)},
-					Outbound: "direct",
-				})
-			} else {
-				rules = append(rules, RouteRule{
-					Domain:   []string{server.Address},
-					Outbound: "direct",
-				})
+		// Process matching is not guaranteed to succeed — it depends on
+		// sing-box being able to attribute a connection to an owning process,
+		// which does not always work. When it silently fails, Xray's own
+		// connection to the node is captured by the tunnel it is carrying,
+		// and every request dies with an EOF that names no cause. Matching
+		// the node's addresses directly does not depend on that mechanism, so
+		// both rules are present and either one alone is sufficient.
+		var cidrs []string
+		if server.Address != "" && net.ParseIP(server.Address) != nil {
+			cidrs = append(cidrs, hostRoute(server.Address))
+		}
+		for _, ip := range opts.ServerIPs {
+			if parsed := net.ParseIP(ip); parsed != nil {
+				cidrs = append(cidrs, hostRoute(ip))
 			}
+		}
+		if len(cidrs) > 0 {
+			rules = append(rules, RouteRule{IPCIDR: cidrs, Outbound: "direct"})
+		}
+		if server.Address != "" && net.ParseIP(server.Address) == nil {
+			rules = append(rules, RouteRule{
+				Domain:   []string{server.Address},
+				Outbound: "direct",
+			})
 		}
 	}
 
@@ -511,7 +580,9 @@ func buildRoute(server subscription.Server, opts Options) RouteConfig {
 	return RouteConfig{
 		Rules:                 rules,
 		Final:                 "proxy",
-		DefaultDomainResolver: "proxy-dns",
+		// Outbounds resolve through the real resolver. Handing them a FakeIP
+		// address would mean dialling a placeholder that routes nowhere.
+		DefaultDomainResolver: "local-dns",
 		AutoDetectInterface:   true,
 	}
 }

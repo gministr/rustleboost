@@ -251,6 +251,70 @@ func TestGRPCRealityBuildsWithoutXray(t *testing.T) {
 	}
 }
 
+// Regression guard for the failure that made the app useless on a network
+// where 1.1.1.1 is blocked: every lookup went to DNS-over-HTTPS there, so
+// each one died on a ten second timeout and nothing resolved, even though
+// the tunnel itself was up and passing the readiness probe. Name resolution
+// must not depend on reaching any single fixed upstream.
+func TestDNSUsesFakeIPAndNoFixedUpstream(t *testing.T) {
+	s := parseOne(t, xhttpTLSURI)
+
+	cfg, err := Generate(s, Options{TUNMode: true, RouteMode: "ru", RouterMode: RouterXray})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	var hasFakeIP bool
+	for _, server := range cfg.DNS.Servers {
+		switch server.Type {
+		case "fakeip":
+			hasFakeIP = true
+		case "https", "tls", "quic", "udp", "tcp":
+			t.Errorf("DNS server %q points at a fixed upstream (%s %s) — one blocked "+
+				"address there takes down all name resolution",
+				server.Tag, server.Type, server.Server)
+		}
+	}
+	if !hasFakeIP {
+		t.Fatal("no fakeip server: lookups would need a reachable upstream")
+	}
+
+	var addressLookups, xrayLookups, nodeLookups string
+	for _, rule := range cfg.DNS.Rules {
+		for _, q := range rule.QueryType {
+			if q == "A" {
+				addressLookups = rule.Server
+			}
+		}
+		for _, p := range rule.ProcessName {
+			if p == "xray.exe" {
+				xrayLookups = rule.Server
+			}
+		}
+		for _, d := range rule.Domain {
+			if d == s.Address {
+				nodeLookups = rule.Server
+			}
+		}
+	}
+
+	if addressLookups != "fakeip-dns" {
+		t.Errorf("A lookups go to %q, want fakeip-dns", addressLookups)
+	}
+	// Xray dials the node itself; a placeholder address would send it back
+	// into the tunnel it is carrying.
+	if xrayLookups != "local-dns" {
+		t.Errorf("Xray's lookups go to %q, want local-dns", xrayLookups)
+	}
+	// The node's own hostname must resolve for real or the tunnel never rises.
+	if nodeLookups != "local-dns" {
+		t.Errorf("node hostname lookups go to %q, want local-dns", nodeLookups)
+	}
+	if cfg.Route.DefaultDomainResolver == "fakeip-dns" {
+		t.Error("outbounds would dial placeholder addresses")
+	}
+}
+
 // Without a bypass for the cores' own traffic, the proxy leg is captured by
 // TUN and the tunnel deadlocks. Nodes addressed by bare IP need a CIDR rule
 // because a domain rule can never match them.

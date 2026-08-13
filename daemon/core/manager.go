@@ -206,6 +206,9 @@ func (m *Manager) Connect(serverID string) error {
 		DNSMode:    settings.DNSMode,
 		AllowLAN:   settings.AllowLAN,
 		RouterMode: settings.RouterMode,
+		// Resolved now, while the system resolver still works normally. Once
+		// the tunnel is up these names answer with placeholder addresses.
+		ServerIPs: resolveHost(selected.Address),
 	}
 	resolvedEngine := config.ResolveEngine(selected, opts.RouterMode)
 	usesXray := resolvedEngine == subscription.EngineXray
@@ -656,6 +659,25 @@ func waitForPort(port int, timeout time.Duration) error {
 
 // GetHWID returns the device HWID info for display in UI
 func (m *Manager) GetHWID() HWIDInfo { return GetHWIDInfo() }
+
+// resolveHost returns a node's IP addresses, or nothing if it is already an
+// IP or cannot be resolved. Failure is not fatal: the route rules that use
+// this are a safety net, and the cores do their own resolution regardless.
+func resolveHost(host string) []string {
+	if host == "" || net.ParseIP(host) != nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		log.Printf("[connect] could not pre-resolve %s: %v", host, err)
+		return nil
+	}
+	return addrs
+}
 
 // engineRussianName is used only in user-facing hint text.
 func engineRussianName(engine string) string {
