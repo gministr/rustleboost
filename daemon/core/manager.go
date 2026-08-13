@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"sync"
 	"time"
 
@@ -602,43 +601,6 @@ func (m *Manager) applyLatency(results map[string]int) {
 	}
 }
 
-// FastestServerID returns the reachable server with the lowest latency,
-// measuring first when no ping data exists yet.
-func (m *Manager) FastestServerID() (string, error) {
-	m.mu.RLock()
-	measured := false
-	for _, s := range m.servers {
-		if s.Latency > 0 {
-			measured = true
-			break
-		}
-	}
-	empty := len(m.servers) == 0
-	m.mu.RUnlock()
-
-	if empty {
-		return "", fmt.Errorf("нет доступных серверов")
-	}
-	if !measured {
-		m.PingAll()
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	candidates := make([]subscription.Server, 0, len(m.servers))
-	for _, s := range m.servers {
-		if s.Latency > 0 {
-			candidates = append(candidates, s)
-		}
-	}
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("ни один сервер не отвечает — проверьте интернет-соединение")
-	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Latency < candidates[j].Latency })
-	return candidates[0].ID, nil
-}
-
 func pingTCP(host string, port int) int {
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	start := time.Now()
@@ -672,10 +634,6 @@ func (m *Manager) GetHWID() HWIDInfo { return GetHWIDInfo() }
 // flows. Past it we report connected anyway: the probe host may be
 // unreachable while the rest of the internet works fine.
 const tunnelReadyTimeout = 15 * time.Second
-
-// probeURL is a captive-portal endpoint: it answers 204 with an empty body,
-// so a round trip measures the tunnel rather than a page download.
-const probeURL = "http://cp.cloudflare.com/generate_204"
 
 // waitForTunnelReady polls through the local mixed inbound until a request
 // completes end to end — inbound, routing, proxy outbound, and the node

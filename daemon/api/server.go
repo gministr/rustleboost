@@ -39,7 +39,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/disconnect", s.handleDisconnect)
 	s.mux.HandleFunc("/api/servers", s.handleServers)
 	s.mux.HandleFunc("/api/subscription", s.handleSubscription)
-	s.mux.HandleFunc("/api/connect-fastest", s.handleConnectFastest)
 	s.mux.HandleFunc("/api/ping", s.handlePing)
 	s.mux.HandleFunc("/api/ping-all", s.handlePingAll)
 	s.mux.HandleFunc("/api/settings", s.handleSettings)
@@ -131,27 +130,6 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-// handleConnectFastest picks the lowest-latency reachable node and connects
-// to it, so the user never has to guess which location is healthy today.
-func (s *Server) handleConnectFastest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	serverID, err := s.manager.FastestServerID()
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	if err := s.manager.Connect(serverID); err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	jsonResponse(w, map[string]string{"status": "connected", "server_id": serverID})
 }
 
 func (s *Server) handlePing(w http.ResponseWriter, r *http.Request) {

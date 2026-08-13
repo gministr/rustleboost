@@ -22,6 +22,17 @@ func main() {
 		log.Fatalf("Failed to create data dir: %v", err)
 	}
 
+	// The daemon is built for the GUI subsystem so Windows can never give it a
+	// console window, which means stderr goes nowhere. Logs go to a file
+	// instead — they are the only way to diagnose a failed connection.
+	if logFile, err := os.OpenFile(
+		filepath.Join(*dataDir, "daemon.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644,
+	); err == nil {
+		log.SetOutput(logFile)
+		defer logFile.Close()
+	}
+
 	// A previous run may have been killed before it could stop its cores.
 	core.CleanupStaleCores(*dataDir)
 

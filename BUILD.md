@@ -77,7 +77,10 @@ go mod tidy
 go test ./...
 
 $env:GOOS="windows"; $env:GOARCH="amd64"
-go build -o ..\src-tauri\binaries\daemon-x86_64-pc-windows-msvc.exe .
+# -H windowsgui: без него Windows даёт демону консоль, и она мелькает
+# чёрным окном при каждом запуске приложения. Логи идут в
+# %APPDATA%\RustleBoost\daemon.log
+go build -ldflags "-s -w -H windowsgui" -o ..\src-tauri\binaries\daemon-x86_64-pc-windows-msvc.exe .
 cd ..
 ```
 

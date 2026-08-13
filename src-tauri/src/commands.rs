@@ -49,11 +49,6 @@ pub async fn connect_server(server_id: String) -> Result<serde_json::Value, Stri
 }
 
 #[tauri::command]
-pub async fn connect_fastest() -> Result<serde_json::Value, String> {
-    send(client().post(daemon_url("/api/connect-fastest"))).await
-}
-
-#[tauri::command]
 pub async fn disconnect() -> Result<serde_json::Value, String> {
     send(client().post(daemon_url("/api/disconnect"))).await
 }

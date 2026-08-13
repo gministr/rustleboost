@@ -51,7 +51,7 @@ jobs:
         env:
           GOOS: windows
           GOARCH: amd64
-        run: go build -ldflags "-s -w" -o ../src-tauri/binaries/daemon-x86_64-pc-windows-msvc.exe .
+        run: go build -ldflags "-s -w -H windowsgui" -o ../src-tauri/binaries/daemon-x86_64-pc-windows-msvc.exe .
 
       - name: Verify bundled cores
         shell: bash

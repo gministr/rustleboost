@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { RefreshCw, Wifi, Globe, Zap, ArrowDown, ArrowUp } from "lucide-react";
+import { RefreshCw, Wifi, Globe, ArrowDown, ArrowUp } from "lucide-react";
 import { useVPNStore } from "../store/vpnStore";
 import ConnectionButton from "../components/ConnectionButton";
 import ServerCard from "../components/ServerCard";
@@ -24,9 +24,9 @@ const stateColors: Record<string, string> = {
 
 export default function MainPage() {
   const {
-    status, servers, connect, connectFastest, disconnect,
+    status, servers, connect, disconnect,
     error, clearError, updateSubscription, settings, info,
-    fetchServers, pingAll, connectingId,
+    fetchServers, pingAll,
   } = useVPNStore();
   const { state, server, stats } = status;
   const t = useT();
@@ -35,12 +35,12 @@ export default function MainPage() {
   const [pinging, setPinging]         = useState(false);
   const [pingingId, setPingingId]     = useState<string | null>(null);
 
-  // With no server chosen yet, pick the fastest reachable one rather than
-  // whichever happens to sit at the top of the list.
   const handleToggle = () => {
     if (state === "connected" || state === "connecting") disconnect();
-    else if (server) connect(server.id);
-    else connectFastest();
+    else {
+      const target = server ?? servers[0];
+      if (target) connect(target.id);
+    }
   };
 
   const handleRefreshSub = async () => {
@@ -143,16 +143,6 @@ export default function MainPage() {
             )}
           </p>
           <div style={{ display: "flex", gap: 6 }}>
-            <IconBtn
-              title={t("connectFastest")}
-              disabled={servers.length === 0 || connectingId === "auto"}
-              onClick={connectFastest}
-            >
-              <Zap size={13} style={{
-                color: connectingId === "auto" ? "#facc15" : undefined,
-                animation: connectingId === "auto" ? "pulse 1s infinite" : "none",
-              }} />
-            </IconBtn>
             <IconBtn title={t("checkPing")} disabled={pinging || servers.length === 0} onClick={handlePingAll}>
               <Wifi size={13} style={{ animation: pinging ? "pulse 1s infinite" : "none" }} />
             </IconBtn>

@@ -83,8 +83,6 @@ export const api = {
   getStatus: () => call<Status>("get_status"),
   getHWID: () => call<HWIDInfo>("get_hwid"),
   connect: (serverId: string) => call<{ status: string }>("connect_server", { serverId }),
-  connectFastest: () =>
-    call<{ status: string; server_id: string }>("connect_fastest"),
   disconnect: () => call<{ status: string }>("disconnect"),
   getServers: () => call<Server[]>("get_servers"),
   getSubscription: () =>

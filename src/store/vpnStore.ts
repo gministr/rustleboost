@@ -17,7 +17,6 @@ interface VPNStore {
   fetchSettings: () => Promise<void>;
   fetchSubscription: () => Promise<void>;
   connect: (serverId: string) => Promise<void>;
-  connectFastest: () => Promise<void>;
   disconnect: () => Promise<void>;
   updateSubscription: (url: string) => Promise<void>;
   saveSettings: (s: Partial<Settings>) => Promise<void>;
@@ -111,21 +110,6 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       set({
         connectingId: null,
         error: errorText(e, get().settings.language as Language, "errConnect"),
-        status: { ...get().status, state: "disconnected" },
-      });
-    }
-  },
-
-  connectFastest: async () => {
-    set({ connectingId: "auto", error: null });
-    try {
-      await api.connectFastest();
-      const [status, servers] = await Promise.all([api.getStatus(), api.getServers()]);
-      set({ status, servers: servers ?? [], connectingId: null });
-    } catch (e: unknown) {
-      set({
-        connectingId: null,
-        error: errorText(e, get().settings.language as Language, "errFastest"),
         status: { ...get().status, state: "disconnected" },
       });
     }

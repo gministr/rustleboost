@@ -22,7 +22,6 @@ const ru = {
   noServers: "Нет серверов",
   refreshSubscription: "Обновить подписку",
   checkPing: "Проверить пинг",
-  connectFastest: "Подключиться к самому быстрому",
   unlimited: "бессрочно",
   expired: "Подписка истекла",
   daysLeft: "Осталось дней",
@@ -34,7 +33,6 @@ const ru = {
   // Errors
   errConnect: "Не удалось подключиться",
   errDisconnect: "Не удалось отключиться",
-  errFastest: "Не удалось подобрать сервер",
   errSubscription: "Не удалось обновить подписку",
   errSettings: "Не удалось сохранить настройки",
 
@@ -120,7 +118,6 @@ const en: Dictionary = {
   noServers: "No servers",
   refreshSubscription: "Refresh subscription",
   checkPing: "Test latency",
-  connectFastest: "Connect to the fastest server",
   unlimited: "never expires",
   expired: "Subscription expired",
   daysLeft: "Days left",
@@ -130,7 +127,6 @@ const en: Dictionary = {
 
   errConnect: "Could not connect",
   errDisconnect: "Could not disconnect",
-  errFastest: "Could not pick a server",
   errSubscription: "Could not refresh the subscription",
   errSettings: "Could not save settings",
 
