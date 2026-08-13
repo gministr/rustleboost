@@ -38,6 +38,10 @@ type Status struct {
 	Stats  Stats                `json:"stats"`
 	Engine string               `json:"engine,omitempty"`
 	Error  string               `json:"error,omitempty"`
+	// Warning is set when the app reports "connected" but could not verify
+	// the tunnel actually carries traffic — a state the user cannot tell
+	// apart from a working connection without this hint.
+	Warning string `json:"warning,omitempty"`
 }
 
 type Manager struct {
@@ -53,6 +57,7 @@ type Manager struct {
 	state       ConnectionState
 	engine      string
 	lastError   string
+	lastWarning string
 	session     uint64 // bumped per connect; identifies the live watchdog
 	connectedAt time.Time
 	subCancel   context.CancelFunc
@@ -124,10 +129,11 @@ func (m *Manager) GetStatus() Status {
 	defer m.mu.RUnlock()
 
 	status := Status{
-		State:  m.state,
-		Server: m.current,
-		Engine: m.engine,
-		Error:  m.lastError,
+		State:   m.state,
+		Server:  m.current,
+		Engine:  m.engine,
+		Error:   m.lastError,
+		Warning: m.lastWarning,
 	}
 
 	if m.state == StateConnected && !m.connectedAt.IsZero() {
@@ -190,18 +196,22 @@ func (m *Manager) Connect(serverID string) error {
 	m.state = StateConnecting
 	m.current = &selected
 	m.lastError = ""
+	m.lastWarning = ""
 	m.mu.Unlock()
 
 	settings := m.store.GetSettings()
 	opts := config.Options{
-		TUNMode:   settings.TUNMode,
-		RouteMode: settings.RouteMode,
-		DNSMode:   settings.DNSMode,
-		AllowLAN:  settings.AllowLAN,
+		TUNMode:    settings.TUNMode,
+		RouteMode:  settings.RouteMode,
+		DNSMode:    settings.DNSMode,
+		AllowLAN:   settings.AllowLAN,
+		RouterMode: settings.RouterMode,
 	}
+	resolvedEngine := config.ResolveEngine(selected, opts.RouterMode)
+	usesXray := resolvedEngine == subscription.EngineXray
 
 	engine := "sing-box"
-	if config.NeedsXray(selected) {
+	if usesXray {
 		engine = "sing-box + xray"
 
 		xrayCfg, err := config.GenerateXray(selected, opts)
@@ -241,8 +251,22 @@ func (m *Manager) Connect(serverID string) error {
 	// reporting "connected" the moment they start leaves the user staring at
 	// a green screen while nothing loads. Hold the state until real traffic
 	// makes it through.
+	tunnelWarning := ""
 	if err := waitForTunnelReady(tunnelReadyTimeout); err != nil {
 		log.Printf("[connect] tunnel not verified within %s: %v", tunnelReadyTimeout, err)
+		// This is the one symptom a user cannot self-diagnose: the app says
+		// connected, but nothing loads, and nothing in the UI explains why.
+		// The single most common cause on this app is a network that blocks
+		// one core's handshake but not the other's — so point straight at
+		// the setting that fixes it rather than a generic "check connection".
+		other := "Xray"
+		if resolvedEngine == subscription.EngineXray {
+			other = "sing-box"
+		}
+		tunnelWarning = fmt.Sprintf(
+			"Похоже, туннель не заработал через %s. Если сайты не открываются, "+
+				"попробуйте переключить режим ядра на «%s» или «Авто» в настройках.",
+			engineRussianName(resolvedEngine), other)
 	}
 
 	if settings.TUNMode {
@@ -253,11 +277,12 @@ func (m *Manager) Connect(serverID string) error {
 	m.state = StateConnected
 	m.engine = engine
 	m.connectedAt = time.Now()
+	m.lastWarning = tunnelWarning
 	m.session++
 	session := m.session
 	m.mu.Unlock()
 
-	go m.watchCores(session, config.NeedsXray(selected), opts)
+	go m.watchCores(session, usesXray, opts)
 
 	m.store.UpdateSettings(func(s *storage.Settings) {
 		s.LastServerID = serverID
@@ -345,6 +370,7 @@ func (m *Manager) failConnect(err error) error {
 	m.current = nil
 	m.engine = ""
 	m.lastError = err.Error()
+	m.lastWarning = ""
 	m.connectedAt = time.Time{}
 	m.mu.Unlock()
 
@@ -373,6 +399,7 @@ func (m *Manager) Disconnect() error {
 	m.state = StateDisconnected
 	m.current = nil
 	m.engine = ""
+	m.lastWarning = ""
 	m.connectedAt = time.Time{}
 	m.mu.Unlock()
 
@@ -629,6 +656,14 @@ func waitForPort(port int, timeout time.Duration) error {
 
 // GetHWID returns the device HWID info for display in UI
 func (m *Manager) GetHWID() HWIDInfo { return GetHWIDInfo() }
+
+// engineRussianName is used only in user-facing hint text.
+func engineRussianName(engine string) string {
+	if engine == subscription.EngineXray {
+		return "Xray"
+	}
+	return "sing-box"
+}
 
 // tunnelReadyTimeout bounds how long a connect waits for proof that traffic
 // flows. Past it we report connected anyway: the probe host may be

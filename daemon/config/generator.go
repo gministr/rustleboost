@@ -159,12 +159,20 @@ type TransportConfig struct {
 }
 
 type Options struct {
-	TUNMode   bool
-	RouteMode string // "all" | "ru" | "cn"
-	DNSMode   string
-	LogLevel  string
-	AllowLAN  bool
+	TUNMode    bool
+	RouteMode  string // "all" | "ru" | "cn"
+	DNSMode    string
+	LogLevel   string
+	AllowLAN   bool
+	RouterMode string // "auto" | "singbox" | "xray"
 }
+
+// Router mode values, mirrored from storage.Settings.RouterMode.
+const (
+	RouterAuto    = "auto"
+	RouterSingBox = "singbox"
+	RouterXray    = "xray"
+)
 
 // ── Xray ──────────────────────────────────────────────────────────────────
 
@@ -312,14 +320,56 @@ func retagXrayOutbound(raw json.RawMessage, tag string) (json.RawMessage, error)
 	return json.Marshal(m)
 }
 
-// NeedsXray reports whether a server must be carried by Xray-core.
+// ResolveEngine decides which core actually carries a node's traffic,
+// honouring the user's router-mode override.
+//
+// Automatic selection sounds strictly better than a manual switch — sing-box
+// natively is one fewer process, one fewer thing that can fail. It is not:
+// which implementation's handshake gets through a given network is not a
+// property of the node or the hardware, it is a property of what that
+// network's own filtering happens to fingerprint on that day, and it can
+// differ between two people on the same subscription. A choice that only
+// the user's own trial and error can make correctly must stay theirs.
+//
+// Only one kind of node has no choice regardless of the setting:
+// Hysteria2/TUIC/NaiveProxy have no Xray path in this client at all, so even
+// "Xray" mode falls back to sing-box for them. XHTTP/mKCP nodes are the
+// opposite case — sing-box has no such transport — but forcing "sing-box"
+// mode is still honoured literally here: it resolves to sing-box, and it is
+// left to the caller (buildProxyOutbound) to refuse with a clear reason
+// rather than have ResolveEngine quietly substitute Xray back in, which
+// would defeat the point of forcing sing-box in the first place — the user
+// asked specifically to rule it out.
+func ResolveEngine(server subscription.Server, routerMode string) string {
+	singBoxOnly := server.Engine == subscription.EngineSingBox && len(server.Outbound) == 0
+
+	switch routerMode {
+	case RouterXray:
+		if singBoxOnly {
+			return subscription.EngineSingBox
+		}
+		return subscription.EngineXray
+	case RouterSingBox:
+		return subscription.EngineSingBox
+	default: // RouterAuto, or unset
+		if server.Engine == subscription.EngineXray {
+			return subscription.EngineXray
+		}
+		return subscription.EngineSingBox
+	}
+}
+
+// NeedsXray reports whether a server would use Xray under automatic engine
+// selection. It has no router-mode override; use it only where one does not
+// apply (latency measurement, tests) — a real connect must go through
+// ResolveEngine with the user's actual setting.
 func NeedsXray(server subscription.Server) bool {
-	return server.Engine == subscription.EngineXray && len(server.Outbound) > 0
+	return ResolveEngine(server, RouterAuto) == subscription.EngineXray
 }
 
 // Generate builds the sing-box side.
 func Generate(server subscription.Server, opts Options) (*SingBoxConfig, error) {
-	proxyOut, err := buildProxyOutbound(server)
+	proxyOut, err := buildProxyOutbound(server, opts.RouterMode)
 	if err != nil {
 		return nil, fmt.Errorf("build outbound: %w", err)
 	}
@@ -506,8 +556,13 @@ func buildInbounds(opts Options) []interface{} {
 
 // ── Outbound builders ─────────────────────────────────────────────────────
 
-func buildProxyOutbound(server subscription.Server) (interface{}, error) {
-	if NeedsXray(server) {
+func buildProxyOutbound(server subscription.Server, routerMode string) (interface{}, error) {
+	engine := ResolveEngine(server, routerMode)
+
+	if engine == subscription.EngineXray {
+		if len(server.Outbound) == 0 {
+			return nil, fmt.Errorf("узел %q не поддерживает режим Xray", server.Name)
+		}
 		return SocksOutbound{
 			Type:       "socks",
 			Tag:        "proxy",
@@ -531,6 +586,17 @@ func buildProxyOutbound(server subscription.Server) (interface{}, error) {
 			return nil, fmt.Errorf("decode outbound for %q: %w", server.Name, err)
 		}
 		return raw, nil
+	}
+
+	// Reaching here with a node whose engine can only be Xray (an XHTTP/mKCP
+	// transport) means the user forced "только sing-box" against a node that
+	// genuinely cannot run there. Building anyway would silently emit a
+	// wrong-transport outbound — e.g. XHTTP treated as plain TCP — that fails
+	// to connect with no clue why. Say so instead.
+	if server.Engine == subscription.EngineXray {
+		return nil, fmt.Errorf(
+			"узел %q работает только через Xray (%s) — переключите режим ядра на «Xray» или «Авто» в настройках",
+			server.Name, server.Transport)
 	}
 
 	switch server.Protocol {

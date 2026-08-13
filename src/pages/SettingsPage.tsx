@@ -10,7 +10,7 @@ import { useT, formatHours, Language } from "../i18n";
 type ReqStatus = "idle" | "loading" | "success" | "error";
 
 /** Kept in step with package.json and tauri.conf.json on every release. */
-const APP_VERSION = "1.1.1";
+const APP_VERSION = "1.2.0";
 
 /* ── Toggle ─────────────────────────────────────────────────────────── */
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -331,6 +331,56 @@ export default function SettingsPage() {
                 <button
                   key={value}
                   onClick={() => saveSettings({ route_mode: value })}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 12,
+                    padding: "10px 14px", borderRadius: 10, cursor: "pointer",
+                    background: active ? "rgba(14,165,233,0.15)" : "rgba(255,255,255,0.04)",
+                    border: `1px solid ${active ? "rgba(14,165,233,0.45)" : "var(--c-surface-hover)"}`,
+                    transition: "all 0.15s", textAlign: "left",
+                  }}
+                >
+                  <div style={{
+                    width: 16, height: 16, borderRadius: "50%", flexShrink: 0,
+                    border: `2px solid ${active ? "#0ea5e9" : "var(--c-text-dim)"}`,
+                    background: active ? "#0ea5e9" : "transparent",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}>
+                    {active && <div style={{ width: 6, height: 6, borderRadius: "50%", background: "white" }} />}
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <p style={{ fontSize: 13, fontWeight: 600, color: active ? "#38bdf8" : "var(--c-text)", margin: 0 }}>{t(labelKey)}</p>
+                    <p style={{ fontSize: 11, color: "var(--c-text-sub)", margin: "2px 0 0" }}>{t(subKey)}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <p style={{ fontSize: 11, color: "var(--c-text-dim)", marginTop: 10, lineHeight: 1.5 }}>
+            {t("appliesNextConnect")}
+          </p>
+        </div>
+
+        {/* ── Ядро подключения ── */}
+        <Sec title={t("secRouter")} />
+        <div style={{
+          background: "var(--c-surface)",
+          border: "1px solid rgba(255,255,255,0.07)",
+          borderRadius: 14, padding: 16, marginBottom: 8,
+        }}>
+          <p style={{ fontSize: 12, color: "var(--c-text-sub)", margin: "0 0 12px", lineHeight: 1.5 }}>
+            {t("routerHint")}
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {([
+              { value: "auto",    labelKey: "routerAuto",    subKey: "routerAutoSub" },
+              { value: "singbox", labelKey: "routerSingBox", subKey: "routerSingBoxSub" },
+              { value: "xray",    labelKey: "routerXray",    subKey: "routerXraySub" },
+            ] as const).map(({ value, labelKey, subKey }) => {
+              const active = settings.router_mode === value;
+              return (
+                <button
+                  key={value}
+                  onClick={() => saveSettings({ router_mode: value })}
                   style={{
                     display: "flex", alignItems: "center", gap: 12,
                     padding: "10px 14px", borderRadius: 10, cursor: "pointer",

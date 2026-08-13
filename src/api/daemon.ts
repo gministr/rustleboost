@@ -52,6 +52,8 @@ export interface Status {
   /** which cores are carrying the session, e.g. "sing-box + xray" */
   engine?: string;
   error?: string;
+  /** set when "connected" could not be verified — see UpdateBanner-style hint in MainPage */
+  warning?: string;
 }
 
 export interface Settings {
@@ -66,6 +68,13 @@ export interface Settings {
   language: "ru" | "en";
   tun_mode: boolean;
   route_mode: "all" | "ru" | "cn";
+  /**
+   * Which core carries proxy traffic. Which implementation's handshake gets
+   * through a given network isn't predictable from the app's side — it can
+   * differ between two people on the same subscription — so this is a user
+   * choice, not something decided automatically.
+   */
+  router_mode: "auto" | "singbox" | "xray";
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

@@ -21,6 +21,57 @@ const (
 		"&security=tls&sni=cdn.example.com&fp=chrome&alpn=h2#%F0%9F%87%B3%F0%9F%87%B1%20LTE%20%7C%20NL"
 )
 
+// Which core actually carries a node is a user setting, not something the
+// app decides — the same network can block one implementation's handshake
+// and let the other through, and only the user's own trial and error can
+// tell which. ResolveEngine must honour an explicit override even where
+// automatic selection would pick the other core, and refuse rather than
+// silently misconfigure the one combination that is genuinely impossible.
+func TestResolveEngineHonoursOverride(t *testing.T) {
+	grpc := parseOne(t, grpcRealityURI) // sing-box-capable
+	xhttp := parseOne(t, xhttpTLSURI)   // Xray-only
+
+	cases := []struct {
+		name   string
+		server subscription.Server
+		mode   string
+		want   string
+	}{
+		{"grpc auto picks singbox", grpc, RouterAuto, subscription.EngineSingBox},
+		{"grpc forced to singbox stays singbox", grpc, RouterSingBox, subscription.EngineSingBox},
+		{"grpc forced to xray goes to xray", grpc, RouterXray, subscription.EngineXray},
+		{"xhttp auto picks xray", xhttp, RouterAuto, subscription.EngineXray},
+		{"xhttp forced to xray stays xray", xhttp, RouterXray, subscription.EngineXray},
+		// ResolveEngine honours the forced choice literally even though this
+		// specific node cannot actually run on it; Generate() is what turns
+		// that into a clear refusal (see TestSingBoxOnlyModeRejectsXHTTPNode).
+		{"xhttp forced to singbox resolves there — Generate() must reject it", xhttp, RouterSingBox, subscription.EngineSingBox},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ResolveEngine(c.server, c.mode)
+			if got != c.want {
+				t.Errorf("ResolveEngine(mode=%s) = %q, want %q", c.mode, got, c.want)
+			}
+		})
+	}
+}
+
+// Forcing "только sing-box" against an XHTTP-only node must fail loudly, not
+// build a config that quietly treats XHTTP as plain TCP and then times out
+// with no explanation of why.
+func TestSingBoxOnlyModeRejectsXHTTPNode(t *testing.T) {
+	xhttp := parseOne(t, xhttpTLSURI)
+
+	_, err := Generate(xhttp, Options{TUNMode: true, RouterMode: RouterSingBox})
+	if err == nil {
+		t.Fatal("expected an error forcing sing-box-only mode onto an XHTTP node")
+	}
+	if !strings.Contains(err.Error(), "Xray") {
+		t.Errorf("error should point the user at the Xray/Auto setting, got: %v", err)
+	}
+}
+
 func parseOne(t *testing.T, uri string) subscription.Server {
 	t.Helper()
 	servers, err := subscription.Parse([]byte(uri))

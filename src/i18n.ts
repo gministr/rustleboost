@@ -72,6 +72,19 @@ const ru = {
   routeCnSub: ".cn .com.cn — прямое соединение, VPN для остальных",
   appliesNextConnect: "Применяется при следующем подключении",
 
+  // Settings — router (which core carries proxy traffic)
+  secRouter: "Ядро подключения",
+  routerHint: "Какой сайт откроется, а какой — нет, зависит не от сервера, а от того, что блокирует именно ваша сеть. Если что-то не подключается, попробуйте другое ядро.",
+  routerAuto: "Авто",
+  routerAutoSub: "sing-box, где можно, иначе Xray — меньше процессов",
+  routerSingBox: "Только sing-box",
+  routerSingBoxSub: "Серверы на XHTTP не подключатся в этом режиме",
+  routerXray: "Только Xray",
+  routerXraySub: "Все серверы идут через Xray",
+
+  // Main screen — shown when "connected" could not be verified
+  goToSettings: "Настройки",
+
   // Settings — connection
   tunMode: "TUN Mode",
   tunModeSub: "Системный VPN-интерфейс RustleBoost (все приложения)",
@@ -160,6 +173,17 @@ const en: Dictionary = {
   routeCn: "CN sites direct",
   routeCnSub: ".cn .com.cn connect directly, VPN for everything else",
   appliesNextConnect: "Applies on the next connection",
+
+  secRouter: "Connection core",
+  routerHint: "Which site loads and which doesn't depends on what your specific network blocks, not the server. If something won't connect, try the other core.",
+  routerAuto: "Auto",
+  routerAutoSub: "sing-box where it can, Xray otherwise — fewer processes",
+  routerSingBox: "sing-box only",
+  routerSingBoxSub: "Servers using XHTTP won't connect in this mode",
+  routerXray: "Xray only",
+  routerXraySub: "Every server routes through Xray",
+
+  goToSettings: "Settings",
 
   tunMode: "TUN Mode",
   tunModeSub: "System-wide RustleBoost VPN interface (all apps)",
