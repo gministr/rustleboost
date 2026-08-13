@@ -13,6 +13,11 @@ import (
 	"github.com/vpnclient/daemon/storage"
 )
 
+// Version is stamped into the log on every start. Without it a log file sent
+// in for diagnosis cannot be tied to the build that produced it, which makes
+// it impossible to tell a fixed bug from a recurring one.
+const Version = "1.3.1"
+
 func main() {
 	port := flag.String("port", "7777", "API server port")
 	dataDir := flag.String("data", defaultDataDir(), "Data directory")
@@ -54,7 +59,7 @@ func main() {
 
 	server := api.NewServer(manager, store, "localhost:"+*port)
 
-	log.Printf("VPN daemon starting on port %s", *port)
+	log.Printf("RustleBoost daemon v%s starting on port %s", Version, *port)
 
 	// Monitor parent process (linda-vpn.exe) вЂ” exit cleanly when it closes.
 	// This ensures daemon.exe is not locked when the NSIS installer overwrites it.

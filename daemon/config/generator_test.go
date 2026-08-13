@@ -269,10 +269,18 @@ func TestDNSUsesFakeIPAndNoFixedUpstream(t *testing.T) {
 		switch server.Type {
 		case "fakeip":
 			hasFakeIP = true
-		case "https", "tls", "quic", "udp", "tcp":
-			t.Errorf("DNS server %q points at a fixed upstream (%s %s) — one blocked "+
-				"address there takes down all name resolution",
-				server.Tag, server.Type, server.Server)
+		case "local":
+			// The OS resolver's packets follow the system routing table into
+			// the tunnel, where hijack-dns feeds them back to sing-box, which
+			// asks the OS again. The query loops until it times out.
+			t.Errorf("DNS server %q uses the OS resolver — its queries loop through "+
+				"the tunnel and never resolve", server.Tag)
+		default:
+			if server.Detour != "direct" {
+				t.Errorf("DNS server %q (%s %s) has detour %q, want \"direct\" — "+
+					"without it the query is routed into the tunnel and hijacked",
+					server.Tag, server.Type, server.Server, server.Detour)
+			}
 		}
 	}
 	if !hasFakeIP {

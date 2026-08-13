@@ -206,9 +206,11 @@ func (m *Manager) Connect(serverID string) error {
 		DNSMode:    settings.DNSMode,
 		AllowLAN:   settings.AllowLAN,
 		RouterMode: settings.RouterMode,
-		// Resolved now, while the system resolver still works normally. Once
-		// the tunnel is up these names answer with placeholder addresses.
+		// Both read now, while the system resolver still works normally. Once
+		// the tunnel is up these names answer with placeholder addresses, and
+		// the adapter's own DNS entries would point back into the tunnel.
 		ServerIPs: resolveHost(selected.Address),
+		SystemDNS: SystemDNSServers(),
 	}
 	resolvedEngine := config.ResolveEngine(selected, opts.RouterMode)
 	usesXray := resolvedEngine == subscription.EngineXray

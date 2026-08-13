@@ -75,6 +75,11 @@ type DNSServer struct {
 	Server     string `json:"server,omitempty"`
 	ServerPort int    `json:"server_port,omitempty"`
 	Path       string `json:"path,omitempty"`
+	// Detour names the outbound used to reach this server. "direct" makes
+	// sing-box dial it through its own direct outbound, which binds to the
+	// physical interface — the query then never enters the tunnel and cannot
+	// be caught by the hijack-dns rules.
+	Detour string `json:"detour,omitempty"`
 	// FakeIP pools. sing-box 1.12 replaced the old top-level "fakeip" block
 	// with these fields on a server of type "fakeip".
 	Inet4Range string `json:"inet4_range,omitempty"`
@@ -186,6 +191,10 @@ type Options struct {
 	// They become direct routes so the proxy leg cannot be swallowed by the
 	// tunnel it is carrying, without relying on process matching.
 	ServerIPs []string
+	// SystemDNS are the machine's own resolvers, read before the tunnel came
+	// up. On a censored network the ISP's resolver is the address most likely
+	// to answer, so it is preferred over any fixed public one.
+	SystemDNS []string
 }
 
 // Router mode values, mirrored from storage.Settings.RouterMode.
@@ -498,25 +507,62 @@ func buildDNS(server subscription.Server, opts Options) *DNSConfig {
 		DNSRule{QueryType: []string{"A", "AAAA"}, Server: "fakeip-dns"},
 	)
 
+	servers := []DNSServer{{
+		Tag:        "fakeip-dns",
+		Type:       "fakeip",
+		Inet4Range: "198.18.0.0/15",
+		Inet6Range: "fc00::/18",
+	}}
+	servers = append(servers, localResolvers(opts)...)
+
 	return &DNSConfig{
-		Servers: []DNSServer{
-			{
-				Tag:        "fakeip-dns",
-				Type:       "fakeip",
-				Inet4Range: "198.18.0.0/15",
-				Inet6Range: "fc00::/18",
-			},
-			// The system resolver, not a fixed public one: on a censored
-			// network the ISP's own resolver is the address most likely to
-			// answer, and it is only used for the few lookups above.
-			{Tag: "local-dns", Type: "local"},
-		},
-		Rules: rules,
+		Servers: servers,
+		Rules:   rules,
 		// Anything that is not an address lookup (PTR, HTTPS records, SRV)
 		// has no FakeIP equivalent and goes to the real resolver.
 		Final:            "local-dns",
 		IndependentCache: true,
 	}
+}
+
+// localResolvers builds the server that answers the lookups FakeIP cannot.
+//
+// It must never be sing-box's "local" type. That resolves through the OS,
+// whose packets follow the system routing table straight into the tunnel,
+// where the hijack-dns rules catch them and hand them back to sing-box —
+// which asks the OS again. The query loops until it times out, and because
+// this resolver serves the node's own hostname and every direct-routed
+// domain, the whole connection dies with it. Observed as repeated
+// "read udp <lan-ip>:x-><router-ip>:53: i/o timeout" against a router that
+// was reachable the entire time.
+//
+// Naming the addresses explicitly and dialling them through the direct
+// outbound keeps the query on the physical interface, out of the tunnel's
+// reach.
+func localResolvers(opts Options) []DNSServer {
+	addresses := opts.SystemDNS
+	if len(addresses) == 0 {
+		// Only if the machine's own resolvers could not be read. These are
+		// a poor substitute — they are exactly the addresses most likely to
+		// be blocked on the networks this client exists for — but a fixed
+		// fallback beats no resolver at all.
+		addresses = []string{"8.8.8.8", "1.1.1.1"}
+	}
+
+	servers := make([]DNSServer, 0, len(addresses))
+	for i, address := range addresses {
+		tag := "local-dns"
+		if i > 0 {
+			tag = fmt.Sprintf("local-dns-%d", i+1)
+		}
+		servers = append(servers, DNSServer{
+			Tag:    tag,
+			Type:   "udp",
+			Server: address,
+			Detour: "direct",
+		})
+	}
+	return servers
 }
 
 func buildRoute(server subscription.Server, opts Options) RouteConfig {
