@@ -59,7 +59,7 @@
       "open": true
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBQUQwQjlCRDhEQzY1QTIKUldTaVpkelltd3V0K293UVpDRHBSdXdhNE5HL2R4VEswaFNzdlhYaitDMENVZWpyYUV1ZHl4VmYK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVDQjQ3OTA0NjE1NkE1NEIKUldSTHBWWmhCSG0wWEIwVElCOGIybU1mVmhEUmhiQ3JhNGVsZnN6LzQwdnBrb3k3YnU2QVhtSEEK",
       "endpoints": [
         "https://github.com/gministr/rustleboost/releases/latest/download/latest.json"
       ]
