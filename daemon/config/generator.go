@@ -555,11 +555,14 @@ func localResolvers(opts Options) []DNSServer {
 		if i > 0 {
 			tag = fmt.Sprintf("local-dns-%d", i+1)
 		}
+		// No detour: sing-box refuses one pointing at a plain direct outbound
+		// ("detour to an empty direct outbound makes no sense") and fails to
+		// start. Its own DNS dials do not pass through the inbound route
+		// rules anyway, so they are never caught by hijack-dns.
 		servers = append(servers, DNSServer{
 			Tag:    tag,
 			Type:   "udp",
 			Server: address,
-			Detour: "direct",
 		})
 	}
 	return servers
@@ -659,11 +662,17 @@ func buildInbounds(opts Options) []interface{} {
 			Address:       []string{"172.19.0.1/30"},
 			MTU:           1500,
 			AutoRoute: true,
-			// Windows decides an interface is online by probing through it.
-			// With strict_route off, its probes went out the physical NIC
-			// instead, so the adapter kept reporting "No Internet" the whole
-			// time the tunnel was actually working.
-			StrictRoute:            true,
+			// Off deliberately. It was switched on to make Windows report the
+			// adapter as online, by forcing the connectivity probe through
+			// the tunnel. On Windows it installs filters that drop traffic
+			// outside the tunnel — including the reply to a DNS query sent
+			// from the physical interface, which is how one machine ended up
+			// with every lookup timing out ("read response: i/o timeout"
+			// against a router that was answering everyone else). FakeIP now
+			// resolves the probe's hostname without a real lookup and carries
+			// the connection through the tunnel, so the original reason for
+			// turning this on no longer applies.
+			StrictRoute:            false,
 			Stack:                  "mixed",
 			EndpointIndependentNat: true,
 		})

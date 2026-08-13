@@ -269,17 +269,14 @@ func TestDNSUsesFakeIPAndNoFixedUpstream(t *testing.T) {
 		switch server.Type {
 		case "fakeip":
 			hasFakeIP = true
-		case "local":
-			// The OS resolver's packets follow the system routing table into
-			// the tunnel, where hijack-dns feeds them back to sing-box, which
-			// asks the OS again. The query loops until it times out.
-			t.Errorf("DNS server %q uses the OS resolver — its queries loop through "+
-				"the tunnel and never resolve", server.Tag)
 		default:
-			if server.Detour != "direct" {
-				t.Errorf("DNS server %q (%s %s) has detour %q, want \"direct\" — "+
-					"without it the query is routed into the tunnel and hijacked",
-					server.Tag, server.Type, server.Server, server.Detour)
+			// sing-box refuses to start with a detour pointing at a plain
+			// direct outbound: "detour to an empty direct outbound makes no
+			// sense". `sing-box check` accepts it regardless, so this is
+			// asserted here rather than left to schema validation.
+			if server.Detour != "" {
+				t.Errorf("DNS server %q sets detour %q — the core refuses to start with it",
+					server.Tag, server.Detour)
 			}
 		}
 	}
@@ -395,8 +392,12 @@ func TestRouteHijacksDNSInTunnelMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("second inbound is %T, want TUNInbound", cfg.Inbounds[1])
 	}
-	if !tun.StrictRoute {
-		t.Error("strict_route off — system probes bypass the tunnel")
+	// On Windows this installs filters that drop traffic outside the tunnel,
+	// which included the replies to DNS queries sent from the physical
+	// interface — every lookup timed out on a machine whose router was
+	// answering normally. FakeIP covers what it was originally turned on for.
+	if tun.StrictRoute {
+		t.Error("strict_route on — DNS replies arriving outside the tunnel get dropped")
 	}
 }
 
