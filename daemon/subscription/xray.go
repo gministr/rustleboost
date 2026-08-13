@@ -290,6 +290,13 @@ func singBoxNativeTransport(network string) bool {
 // param keys buildStream (URI path) produces, so the sing-box native builder
 // in the config package can consume either source uniformly.
 func extractStreamParams(params map[string]string, network, security string, s streamSettings, fallbackSNI string) {
+	// The sing-box builder keys its whole TLS decision off this one value.
+	// Leaving it unset made buildTLS fall through to nil, producing a VLESS
+	// outbound with no tls block at all — plaintext to a Reality endpoint,
+	// which cannot connect anywhere. `sing-box check` accepted it because tls
+	// is optional in the schema, so schema validation alone never caught it.
+	params["security"] = security
+
 	sni := fallbackSNI
 	fp := ""
 

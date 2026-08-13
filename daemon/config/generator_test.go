@@ -108,6 +108,54 @@ func TestParseGRPCReality(t *testing.T) {
 	}
 }
 
+// Regression guard for a bug that shipped: the /v2ray-json path never set
+// params["security"], so buildTLS fell through to nil and produced a VLESS
+// outbound with no tls block — plaintext against a Reality endpoint, which
+// cannot connect on any network. `sing-box check` passed it, because tls is
+// optional in the schema, so schema validation could not catch it. Assert on
+// the generated outbound's actual contents instead.
+func TestNativeOutboundKeepsRealityFromV2RayJSON(t *testing.T) {
+	// Shaped exactly like a Remnawave /v2ray-json entry.
+	payload := `[{"remarks":"Wi-Fi | Test","outbounds":[{
+		"tag":"proxy","protocol":"vless",
+		"settings":{"vnext":[{"address":"node.example.com","port":8443,
+			"users":[{"id":"11111111-2222-3333-4444-555555555555","encryption":"none","flow":""}]}]},
+		"streamSettings":{"network":"grpc","security":"reality",
+			"grpcSettings":{"serviceName":""},
+			"realitySettings":{"serverName":"www.example.com","publicKey":"TEST_PUBLIC_KEY",
+				"shortId":"abcd1234","fingerprint":"chrome"}}}]}]`
+
+	servers, err := subscription.Parse([]byte(payload))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("got %d servers, want 1", len(servers))
+	}
+
+	cfg, err := Generate(servers[0], Options{TUNMode: true, RouterMode: RouterSingBox})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	out, ok := cfg.Outbounds[0].(VLESSOutbound)
+	if !ok {
+		t.Fatalf("proxy outbound is %T, want VLESSOutbound", cfg.Outbounds[0])
+	}
+	if out.TLS == nil {
+		t.Fatal("no tls block — the node would get plaintext VLESS and never connect")
+	}
+	if out.TLS.Reality == nil || out.TLS.Reality.PublicKey != "TEST_PUBLIC_KEY" {
+		t.Fatalf("reality lost: %+v", out.TLS.Reality)
+	}
+	if out.TLS.ServerName != "www.example.com" {
+		t.Errorf("server_name = %q, want www.example.com", out.TLS.ServerName)
+	}
+	if out.TLS.UTLS == nil || out.TLS.UTLS.Fingerprint != "chrome" {
+		t.Errorf("utls fingerprint lost: %+v", out.TLS.UTLS)
+	}
+}
+
 // The xhttp "extra" object carries padding and pacing parameters that the
 // server matches exactly; dropping or reformatting it breaks the transport.
 func TestParseXHTTPPreservesExtra(t *testing.T) {

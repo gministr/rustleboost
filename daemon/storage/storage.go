@@ -48,8 +48,12 @@ func New(path string) *Store {
 			TUNMode:        true,
 			// Russian sites go direct by default: they are the ones that get
 			// slower or refuse foreign addresses outright when tunnelled.
-			RouteMode:  "ru",
-			RouterMode: "auto",
+			RouteMode: "ru",
+			// Xray by default. It is the path that has actually connected on
+			// every machine tested so far; sing-box works for some people and
+			// not others, and there is no way to tell which from here. The
+			// switch in Settings is there for anyone it doesn't suit.
+			RouterMode: "xray",
 		},
 	}
 }
