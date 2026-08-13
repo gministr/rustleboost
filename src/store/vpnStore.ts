@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { api, Status, Server, Settings, SubscriptionInfo } from "../api/daemon";
+import { translate, Language, TranslationKey } from "../i18n";
 
 interface VPNStore {
   status: Status;
@@ -24,11 +25,15 @@ interface VPNStore {
   clearError: () => void;
 }
 
-/** Tauri rejects commands with a plain string; Error instances carry .message. */
-function errorText(e: unknown, fallback: string): string {
-  if (typeof e === "string") return e;
+/**
+ * Tauri rejects commands with a plain string; Error instances carry .message.
+ * The daemon already localises what it reports, so its text is preferred and
+ * the translated key only fills in when nothing came back.
+ */
+function errorText(e: unknown, language: Language, key: TranslationKey): string {
+  if (typeof e === "string" && e.trim()) return e;
   if (e instanceof Error && e.message) return e.message;
-  return fallback;
+  return translate(language, key);
 }
 
 const defaultStatus: Status = {
@@ -47,7 +52,7 @@ const defaultSettings: Settings = {
   allow_lan: false,
   language: "ru",
   tun_mode: true,
-  route_mode: "all",
+  route_mode: "ru",
 };
 
 export const useVPNStore = create<VPNStore>((set, get) => ({
@@ -105,7 +110,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     } catch (e: unknown) {
       set({
         connectingId: null,
-        error: errorText(e, "Не удалось подключиться"),
+        error: errorText(e, get().settings.language as Language, "errConnect"),
         status: { ...get().status, state: "disconnected" },
       });
     }
@@ -120,7 +125,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     } catch (e: unknown) {
       set({
         connectingId: null,
-        error: errorText(e, "Не удалось подобрать сервер"),
+        error: errorText(e, get().settings.language as Language, "errFastest"),
         status: { ...get().status, state: "disconnected" },
       });
     }
@@ -132,7 +137,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       await api.disconnect();
       set({ status: defaultStatus });
     } catch (e: unknown) {
-      set({ error: errorText(e, "Не удалось отключиться") });
+      set({ error: errorText(e, get().settings.language as Language, "errDisconnect") });
     }
   },
 
@@ -151,7 +156,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         loading: false,
       });
     } catch (e: unknown) {
-      set({ loading: false, error: errorText(e, "Не удалось обновить подписку") });
+      set({ loading: false, error: errorText(e, get().settings.language as Language, "errSubscription") });
       throw e;
     }
   },
@@ -165,7 +170,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         await api.setAutostart(incoming.auto_connect).catch(() => {});
       }
     } catch (e: unknown) {
-      set({ error: errorText(e, "Не удалось сохранить настройки") });
+      set({ error: errorText(e, get().settings.language as Language, "errSettings") });
     }
   },
 

@@ -5,7 +5,6 @@ package core
 import (
 	"crypto/sha256"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -30,7 +29,7 @@ func GetHWIDInfo() HWIDInfo {
 // Falls back to disk serial hash if registry read fails.
 func machineID() string {
 	// Primary: Windows registry MachineGuid (always present, UUID format, ≤36 chars)
-	out, err := exec.Command(
+	out, err := hiddenCommand(
 		"reg", "query",
 		`HKLM\SOFTWARE\Microsoft\Cryptography`,
 		"/v", "MachineGuid",
@@ -58,7 +57,7 @@ func machineID() string {
 }
 
 func diskSerialHash() string {
-	out, err := exec.Command(
+	out, err := hiddenCommand(
 		"reg", "query",
 		`HKLM\HARDWARE\DESCRIPTION\System\BIOS`,
 		"/v", "SystemSerialNumber",
@@ -79,14 +78,14 @@ func diskSerialHash() string {
 	}
 
 	// Last resort: hostname hash
-	hostname, _ := exec.Command("hostname").Output()
+	hostname, _ := hiddenCommand("hostname").Output()
 	h := sha256.Sum256(hostname)
 	return fmt.Sprintf("%X", h[:16])
 }
 
 func windowsVersion() string {
 	// Read from registry — more reliable than cmd /c ver
-	out, err := exec.Command(
+	out, err := hiddenCommand(
 		"reg", "query",
 		`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`,
 		"/v", "DisplayVersion",
@@ -105,7 +104,7 @@ func windowsVersion() string {
 }
 
 func machineModel() string {
-	out, err := exec.Command(
+	out, err := hiddenCommand(
 		"reg", "query",
 		`HKLM\HARDWARE\DESCRIPTION\System\BIOS`,
 		"/v", "SystemProductName",

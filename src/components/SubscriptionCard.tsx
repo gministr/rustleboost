@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { CalendarClock, Gauge } from "lucide-react";
 import { SubscriptionInfo, formatBytes, formatExpiry, daysLeft } from "../api/daemon";
+import { useT } from "../i18n";
 
 interface Props {
   info: SubscriptionInfo;
@@ -12,6 +13,7 @@ interface Props {
  * billed against.
  */
 export default function SubscriptionCard({ info }: Props) {
+  const t = useT();
   const used = info.upload + info.download;
   const unlimited = info.total <= 0;
   const ratio = unlimited ? 0 : Math.min(used / info.total, 1);
@@ -52,7 +54,7 @@ export default function SubscriptionCard({ info }: Props) {
           style={{ color: expirySoon ? "#facc15" : "var(--c-text-dimmer)", flexShrink: 0 }}
         />
         <span style={{ fontSize: 11, color: expirySoon ? "#facc15" : "var(--c-text-dim)" }}>
-          {formatExpiry(info.expire)}
+          {info.expire ? formatExpiry(info.expire) : t("unlimited")}
         </span>
       </div>
 
@@ -72,7 +74,7 @@ export default function SubscriptionCard({ info }: Props) {
 
       {expirySoon && left !== null && (
         <p style={{ fontSize: 10, color: "#facc15", margin: "6px 0 0" }}>
-          {left <= 0 ? "Подписка истекла" : `Осталось дней: ${left}`}
+          {left <= 0 ? t("expired") : `${t("daysLeft")}: ${left}`}
         </p>
       )}
     </motion.div>

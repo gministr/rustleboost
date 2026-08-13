@@ -331,6 +331,35 @@ func Generate(server subscription.Server, opts Options) (*SingBoxConfig, error) 
 	}, nil
 }
 
+// GenerateBlocking builds a tunnel that accepts traffic and drops it.
+//
+// This is the kill switch. When a core dies unexpectedly the TUN adapter
+// would otherwise disappear and Windows would silently fall back to the
+// physical interface, sending in the clear exactly the traffic the user
+// turned a VPN on to protect. Keeping the adapter up with a reject rule means
+// connections fail instead of leaking.
+func GenerateBlocking(opts Options) *SingBoxConfig {
+	boolTrue := true
+
+	return &SingBoxConfig{
+		Log:      &LogConfig{Level: "warn"},
+		Inbounds: buildInbounds(opts),
+		Outbounds: []interface{}{
+			DirectOutbound{Type: "direct", Tag: "direct"},
+		},
+		Route: RouteConfig{
+			Rules: []RouteRule{
+				// Local traffic keeps working, so the app itself and the
+				// user's LAN devices stay reachable.
+				{IPIsPrivate: &boolTrue, Outbound: "direct"},
+				{Action: "reject"},
+			},
+			Final:               "direct",
+			AutoDetectInterface: true,
+		},
+	}
+}
+
 func bypassSuffixes(mode string) []string {
 	switch mode {
 	case "ru":

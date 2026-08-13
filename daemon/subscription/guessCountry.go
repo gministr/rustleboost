@@ -68,6 +68,10 @@ func isAlpha(r rune) bool {
 
 // codeToCountry maps ISO 2-letter code → English country name
 var codeToCountry = map[string]string{
+	"eu": "European Union", "es": "Spain", "pt": "Portugal", "be": "Belgium",
+	"ie": "Ireland", "gr": "Greece", "rs": "Serbia", "sk": "Slovakia",
+	"si": "Slovenia", "is": "Iceland", "lu": "Luxembourg", "cy": "Cyprus",
+	"ge": "Georgia", "uz": "Uzbekistan", "kg": "Kyrgyzstan", "tw": "Taiwan",
 	"ru": "Russia", "nl": "Netherlands", "de": "Germany", "pl": "Poland",
 	"fi": "Finland", "at": "Austria", "us": "USA", "gb": "UK",
 	"fr": "France", "se": "Sweden", "tr": "Turkey", "jp": "Japan",

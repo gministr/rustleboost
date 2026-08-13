@@ -3,12 +3,14 @@ import { motion } from "framer-motion";
 import { ArrowRight, RefreshCw, AlertCircle } from "lucide-react";
 import { useVPNStore } from "../store/vpnStore";
 import logoUrl from "../assets/logo.png";
+import { useT } from "../i18n";
 
 export default function OnboardingPage() {
   const { updateSubscription } = useVPNStore();
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const t = useT();
 
   const handleSubmit = async () => {
     const trimmed = url.trim();
@@ -18,7 +20,7 @@ export default function OnboardingPage() {
     try {
       await updateSubscription(trimmed);
     } catch (e: any) {
-      setError(e?.message ?? "Не удалось загрузить подписку. Проверьте ссылку.");
+      setError(e?.message ?? t("errLoadSubscription"));
     } finally {
       setLoading(false);
     }
@@ -74,7 +76,7 @@ export default function OnboardingPage() {
             RustleBoost
           </h1>
           <p className="text-sm leading-relaxed" style={{ color: "rgba(255,255,255,0.38)" }}>
-            Введите ключ подписки,<br />чтобы начать использование
+            {t("onboardingTitle")}
           </p>
         </motion.div>
 
@@ -89,7 +91,7 @@ export default function OnboardingPage() {
             className="text-xs font-semibold mb-2"
             style={{ color: "rgba(255,255,255,0.35)", letterSpacing: "0.06em", textTransform: "uppercase" }}
           >
-            URL подписки
+            {t("subscriptionUrl")}
           </p>
           <input
             type="text"
@@ -142,11 +144,11 @@ export default function OnboardingPage() {
             {loading ? (
               <>
                 <RefreshCw size={16} className="animate-spin" />
-                Загрузка подписки...
+                {t("loadingSubscription")}
               </>
             ) : (
               <>
-                Подключить подписку
+                {t("connectSubscription")}
                 <ArrowRight size={16} />
               </>
             )}
@@ -158,7 +160,7 @@ export default function OnboardingPage() {
         className="text-center pb-4"
         style={{ fontSize: 10, color: "rgba(255,255,255,0.13)" }}
       >
-        RustleBoost · sing-box
+        RustleBoost · sing-box + xray
       </p>
     </motion.div>
   );

@@ -33,8 +33,12 @@ func main() {
 	manager := core.NewManager(*dataDir, store)
 
 	settings := store.GetSettings()
-	if settings.AutoConnect && settings.LastServerID != "" {
-		go manager.Connect(settings.LastServerID)
+	if settings.AutoConnect {
+		go func() {
+			if err := manager.ConnectLast(); err != nil {
+				log.Printf("Auto-connect failed: %v", err)
+			}
+		}()
 	}
 
 	server := api.NewServer(manager, store, "localhost:"+*port)

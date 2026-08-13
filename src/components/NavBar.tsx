@@ -1,19 +1,21 @@
 import { NavLink } from "react-router-dom";
 import { Shield, Settings } from "lucide-react";
 import { useVPNStore } from "../store/vpnStore";
+import { useT } from "../i18n";
 
 const tabs = [
-  { to: "/", icon: Shield, label: "Главная" },
-  { to: "/settings", icon: Settings, label: "Настройки" },
+  { to: "/", icon: Shield, labelKey: "navHome" as const },
+  { to: "/settings", icon: Settings, labelKey: "navSettings" as const },
 ];
 
 export default function NavBar() {
   const state = useVPNStore(s => s.status.state);
+  const t = useT();
 
   return (
     <nav className="shrink-0 px-8 py-2" style={{ borderTop: "1px solid var(--c-nav-border)", transition: "border-color 0.3s" }}>
       <div className="flex justify-around">
-        {tabs.map(({ to, icon: Icon, label }) => (
+        {tabs.map(({ to, icon: Icon, labelKey }) => (
           <NavLink
             key={to}
             to={to}
@@ -30,7 +32,7 @@ export default function NavBar() {
                     <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-green-400 rounded-full border border-surface-900" />
                   )}
                 </div>
-                <span className="text-[10px] font-medium">{label}</span>
+                <span className="text-[10px] font-medium">{t(labelKey)}</span>
               </>
             )}
           </NavLink>

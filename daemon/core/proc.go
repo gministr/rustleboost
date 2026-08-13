@@ -66,10 +66,9 @@ func (p *procRunner) start(cfgJSON []byte, cfgName string, args ...string) error
 	logFile, _ := os.OpenFile(p.logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 
 	fullArgs := append(append([]string{}, args...), "-c", cfgPath)
-	p.cmd = exec.Command(binary, fullArgs...)
+	p.cmd = hiddenCommand(binary, fullArgs...)
 	p.cmd.Stdout = logFile
 	p.cmd.Stderr = logFile
-	setSysProcAttr(p.cmd)
 
 	if err := p.cmd.Start(); err != nil {
 		if logFile != nil {
@@ -186,11 +185,11 @@ func killStaleProcess(pid int, name string) bool {
 		return proc.Kill() == nil
 	}
 
-	out, err := exec.Command("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
+	out, err := hiddenCommand("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
 	if err != nil || !strings.Contains(strings.ToLower(string(out)), name+".exe") {
 		return false
 	}
-	return exec.Command("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run() == nil
+	return hiddenCommand("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run() == nil
 }
 
 func (p *procRunner) isRunning() bool { return p.running.Load() }

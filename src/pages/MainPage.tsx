@@ -6,13 +6,14 @@ import ConnectionButton from "../components/ConnectionButton";
 import ServerCard from "../components/ServerCard";
 import SubscriptionCard from "../components/SubscriptionCard";
 import { formatUptime, formatBytes, api } from "../api/daemon";
+import { useT } from "../i18n";
 
-const stateLabels: Record<string, string> = {
-  disconnected:  "Не подключено",
-  connecting:    "Подключение...",
-  connected:     "Защищено",
-  disconnecting: "Отключение...",
-};
+const stateLabelKeys = {
+  disconnected:  "stateDisconnected",
+  connecting:    "stateConnecting",
+  connected:     "stateConnected",
+  disconnecting: "stateDisconnecting",
+} as const;
 
 const stateColors: Record<string, string> = {
   disconnected:  "var(--c-disconnected)",
@@ -28,6 +29,7 @@ export default function MainPage() {
     fetchServers, pingAll, connectingId,
   } = useVPNStore();
   const { state, server, stats } = status;
+  const t = useT();
 
   const [refreshing, setRefreshing]   = useState(false);
   const [pinging, setPinging]         = useState(false);
@@ -102,7 +104,7 @@ export default function MainPage() {
       {/* Status + Button */}
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 16, paddingBottom: 12, flexShrink: 0 }}>
         <p style={{ fontSize: 19, fontWeight: 700, marginBottom: 4, letterSpacing: "-0.02em", color: stateColors[state], transition: "color 0.3s" }}>
-          {stateLabels[state]}
+          {t(stateLabelKeys[state])}
         </p>
         {state === "connected" && stats.uptime > 0 && (
           <p style={{ fontSize: 12, color: "var(--c-uptime)", fontFamily: "monospace", marginBottom: 4 }}>
@@ -135,14 +137,14 @@ export default function MainPage() {
             fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase",
             color: "var(--c-sec-label)",
           }}>
-            Серверы
+            {t("servers")}
             {servers.length > 0 && (
               <span style={{ marginLeft: 6, fontWeight: 400 }}>{servers.length}</span>
             )}
           </p>
           <div style={{ display: "flex", gap: 6 }}>
             <IconBtn
-              title="Подключиться к самому быстрому"
+              title={t("connectFastest")}
               disabled={servers.length === 0 || connectingId === "auto"}
               onClick={connectFastest}
             >
@@ -151,10 +153,10 @@ export default function MainPage() {
                 animation: connectingId === "auto" ? "pulse 1s infinite" : "none",
               }} />
             </IconBtn>
-            <IconBtn title="Проверить пинг" disabled={pinging || servers.length === 0} onClick={handlePingAll}>
+            <IconBtn title={t("checkPing")} disabled={pinging || servers.length === 0} onClick={handlePingAll}>
               <Wifi size={13} style={{ animation: pinging ? "pulse 1s infinite" : "none" }} />
             </IconBtn>
-            <IconBtn title="Обновить подписку" disabled={refreshing} onClick={handleRefreshSub}>
+            <IconBtn title={t("refreshSubscription")} disabled={refreshing} onClick={handleRefreshSub}>
               <RefreshCw size={13} style={{ animation: refreshing ? "spin 1s linear infinite" : "none" }} />
             </IconBtn>
           </div>
@@ -164,9 +166,9 @@ export default function MainPage() {
         {servers.length === 0 ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: 48, gap: 10 }}>
             <Globe size={36} style={{ color: "var(--c-text-dimmer)", strokeWidth: 1 }} />
-            <p style={{ fontSize: 13, color: "var(--c-text-dim)" }}>Нет серверов</p>
+            <p style={{ fontSize: 13, color: "var(--c-text-dim)" }}>{t("noServers")}</p>
             <button onClick={handleRefreshSub} style={{ fontSize: 12, color: "#60a5fa", background: "none", border: "none", cursor: "pointer" }}>
-              Обновить подписку
+              {t("refreshSubscription")}
             </button>
           </div>
         ) : (

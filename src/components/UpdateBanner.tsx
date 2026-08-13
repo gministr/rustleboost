@@ -3,11 +3,13 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { motion, AnimatePresence } from "framer-motion";
 import { Download, X } from "lucide-react";
+import { useT } from "../i18n";
 
 export default function UpdateBanner() {
   const [update, setUpdate] = useState<{ version: string; body: string | null | undefined } | null>(null);
   const [status, setStatus] = useState<"idle" | "downloading" | "done">("idle");
   const [dismissed, setDismissed] = useState(false);
+  const t = useT();
 
   useEffect(() => {
     const look = () => {
@@ -60,7 +62,7 @@ export default function UpdateBanner() {
         <Download size={14} style={{ color: "#60a5fa", flexShrink: 0 }} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <p style={{ fontSize: 12, fontWeight: 600, color: "#93c5fd", margin: 0 }}>
-            Доступно обновление v{update.version}
+            {t("updateAvailable")} v{update.version}
           </p>
           {update.body && (
             <p style={{ fontSize: 11, color: "rgba(147,197,253,0.7)", margin: "2px 0 0",
@@ -79,7 +81,7 @@ export default function UpdateBanner() {
             flexShrink: 0, transition: "background 0.2s",
           }}
         >
-          {status === "downloading" ? "Загрузка..." : status === "done" ? "Готово!" : "Обновить"}
+          {status === "downloading" ? t("updateDownloading") : status === "done" ? t("updateDone") : t("updateAction")}
         </button>
         {status === "idle" && (
           <button onClick={() => setDismissed(true)}

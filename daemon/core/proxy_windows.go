@@ -4,7 +4,6 @@ package core
 
 import (
 	"log"
-	"os/exec"
 )
 
 const proxyOverride = "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;192.168.*;<local>"
@@ -33,7 +32,7 @@ func ClearSystemProxy() {
 }
 
 func run(name string, args ...string) {
-	if err := exec.Command(name, args...).Run(); err != nil {
+	if err := hiddenCommand(name, args...).Run(); err != nil {
 		log.Printf("[proxy] %s %v: %v", name, args, err)
 	}
 }

@@ -3,10 +3,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import logoDarkUrl from "../assets/logo-dark.png";
 import logoLightUrl from "../assets/logo-light.png";
 import { useThemeStore } from "../store/themeStore";
+import { useT } from "../i18n";
 
 export default function TitleBar() {
   const win = getCurrentWindow();
   const { isDark, toggle } = useThemeStore();
+  const t = useT();
 
   // Dark theme → show light (silver) logo; light theme → show dark logo
   const logoSrc = isDark ? logoLightUrl : logoDarkUrl;
@@ -50,7 +52,7 @@ export default function TitleBar() {
           style={{ color: "var(--c-text-sub)" }}
           onMouseEnter={e => (e.currentTarget.style.background = "var(--c-surface-hover)")}
           onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-          title={isDark ? "Светлая тема" : "Тёмная тема"}
+          title={isDark ? t("themeLight") : t("themeDark")}
         >
           {isDark ? <Sun size={13} /> : <Moon size={13} />}
         </button>

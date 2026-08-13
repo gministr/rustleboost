@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"sort"
 	"sync"
 	"time"
@@ -55,6 +54,7 @@ type Manager struct {
 	state       ConnectionState
 	engine      string
 	lastError   string
+	session     uint64 // bumped per connect; identifies the live watchdog
 	connectedAt time.Time
 	subCancel   context.CancelFunc
 }
@@ -254,9 +254,16 @@ func (m *Manager) Connect(serverID string) error {
 	m.state = StateConnected
 	m.engine = engine
 	m.connectedAt = time.Now()
+	m.session++
+	session := m.session
 	m.mu.Unlock()
 
-	m.store.UpdateSettings(func(s *storage.Settings) { s.LastServerID = serverID })
+	go m.watchCores(session, config.NeedsXray(selected), opts)
+
+	m.store.UpdateSettings(func(s *storage.Settings) {
+		s.LastServerID = serverID
+		s.LastServerKey = serverKey(selected)
+	})
 
 	mode := "proxy"
 	if settings.TUNMode {
@@ -265,6 +272,66 @@ func (m *Manager) Connect(serverID string) error {
 	log.Printf("Connected to %s (%s/%s) via %s, %s mode",
 		selected.Name, selected.Protocol, selected.Transport, engine, mode)
 	return nil
+}
+
+// watchCores notices a core dying on its own — a crash, or the server
+// dropping the tunnel — as opposed to the user pressing disconnect.
+//
+// session guards against a stale watcher acting on a later connection: every
+// connect bumps the counter, so a watcher whose session no longer matches
+// simply exits.
+func (m *Manager) watchCores(session uint64, usesXray bool, opts config.Options) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		m.mu.RLock()
+		stale := m.session != session || m.state != StateConnected
+		m.mu.RUnlock()
+		if stale {
+			return
+		}
+
+		if m.singbox.IsRunning() && (!usesXray || m.xray.IsRunning()) {
+			continue
+		}
+
+		log.Println("[watchdog] a core stopped unexpectedly")
+		m.handleUnexpectedStop(session, opts)
+		return
+	}
+}
+
+func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options) {
+	killSwitch := m.store.GetSettings().KillSwitch
+
+	m.singbox.Stop()
+	m.xray.Stop()
+	ClearSystemProxy()
+
+	message := "соединение с сервером прервано"
+
+	if killSwitch && opts.TUNMode {
+		// Raise the blocking tunnel before reporting, so there is no window
+		// in which traffic could reach the network unprotected.
+		if err := m.singbox.Start(config.GenerateBlocking(opts)); err != nil {
+			log.Printf("[watchdog] kill switch failed to engage: %v", err)
+			message = "соединение прервано, и заблокировать трафик не удалось — отключитесь от сети вручную"
+		} else {
+			log.Println("[watchdog] kill switch engaged — traffic blocked")
+			message = "соединение прервано. Kill Switch блокирует трафик — нажмите «Отключить», чтобы вернуть обычный доступ"
+		}
+	}
+
+	m.mu.Lock()
+	if m.session == session {
+		m.state = StateDisconnected
+		m.current = nil
+		m.engine = ""
+		m.connectedAt = time.Time{}
+		m.lastError = message
+	}
+	m.mu.Unlock()
 }
 
 // failConnect rolls the manager back to a clean disconnected state and keeps
@@ -370,17 +437,67 @@ func (m *Manager) UpdateSubscription(subURL string) error {
 		}
 	}
 
+	// Re-point the saved auto-connect target at its new ID, so the choice
+	// outlives a refresh even when the app was closed during it.
+	remappedLastID := ""
+	if settings.LastServerKey != "" {
+		for _, s := range result.Servers {
+			if serverKey(s) == settings.LastServerKey {
+				remappedLastID = s.ID
+				break
+			}
+		}
+	}
+
 	m.servers = result.Servers
 	m.info = result.Info
 	m.mu.Unlock()
 
-	if subURL != settings.SubscriptionURL {
-		m.store.UpdateSettings(func(s *storage.Settings) { s.SubscriptionURL = subURL })
+	if subURL != settings.SubscriptionURL || remappedLastID != "" {
+		m.store.UpdateSettings(func(s *storage.Settings) {
+			if subURL != "" {
+				s.SubscriptionURL = subURL
+			}
+			if remappedLastID != "" {
+				s.LastServerID = remappedLastID
+			}
+		})
 	}
 	m.saveCache()
 
 	log.Printf("Subscription updated: %d servers", len(result.Servers))
 	return nil
+}
+
+// ConnectLast reconnects to the server used last.
+//
+// It cannot rely on the stored ID alone: the panel issues fresh IDs on every
+// subscription refresh, so after an overnight refresh the saved ID matches
+// nothing. The stored key — name, address, port and transport — survives that.
+func (m *Manager) ConnectLast() error {
+	settings := m.store.GetSettings()
+
+	m.mu.RLock()
+	var byID, byKey string
+	for _, s := range m.servers {
+		if s.ID == settings.LastServerID {
+			byID = s.ID
+			break
+		}
+		if settings.LastServerKey != "" && serverKey(s) == settings.LastServerKey {
+			byKey = s.ID
+		}
+	}
+	m.mu.RUnlock()
+
+	target := byID
+	if target == "" {
+		target = byKey
+	}
+	if target == "" {
+		return fmt.Errorf("последний сервер больше не доступен в подписке")
+	}
+	return m.Connect(target)
 }
 
 // serverKey identifies a node across refreshes, independent of its random ID.
@@ -602,7 +719,7 @@ func waitForTunnelReady(timeout time.Duration) error {
 
 func setNetworkCategoryPrivate() {
 	cmd := `Set-NetConnectionProfile -InterfaceAlias 'RustleBoost' -NetworkCategory Private`
-	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", cmd).CombinedOutput()
+	out, err := hiddenCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", cmd).CombinedOutput()
 	if err != nil {
 		log.Printf("[nla] Set-NetConnectionProfile failed: %v — %s", err, out)
 	} else {

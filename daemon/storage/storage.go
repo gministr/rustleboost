@@ -10,15 +10,18 @@ import (
 type Settings struct {
 	SubscriptionURL string `json:"subscription_url"`
 	LastServerID    string `json:"last_server_id"`
-	AutoConnect     bool   `json:"auto_connect"`
-	AutoUpdate      bool   `json:"auto_update"`
-	UpdateInterval  int    `json:"update_interval"`
-	DNSMode         string `json:"dns_mode"`
-	KillSwitch      bool   `json:"kill_switch"`
-	AllowLAN        bool   `json:"allow_lan"`
-	Language        string `json:"language"`
-	TUNMode         bool   `json:"tun_mode"`
-	RouteMode       string `json:"route_mode"` // "all" | "ru" | "cn"
+	// LastServerKey survives a subscription refresh, which reissues every
+	// server ID; auto-connect falls back to it when the ID no longer exists.
+	LastServerKey  string `json:"last_server_key"`
+	AutoConnect    bool   `json:"auto_connect"`
+	AutoUpdate     bool   `json:"auto_update"`
+	UpdateInterval int    `json:"update_interval"`
+	DNSMode        string `json:"dns_mode"`
+	KillSwitch     bool   `json:"kill_switch"`
+	AllowLAN       bool   `json:"allow_lan"`
+	Language       string `json:"language"`
+	TUNMode        bool   `json:"tun_mode"`
+	RouteMode      string `json:"route_mode"` // "all" | "ru" | "cn"
 }
 
 type Store struct {
@@ -38,7 +41,9 @@ func New(path string) *Store {
 			DNSMode:        "local",
 			Language:       "ru",
 			TUNMode:        true,
-			RouteMode:      "all",
+			// Russian sites go direct by default: they are the ones that get
+			// slower or refuse foreign addresses outright when tunnelled.
+			RouteMode: "ru",
 		},
 	}
 }

@@ -5,6 +5,7 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useVPNStore } from "../store/vpnStore";
 import { Settings, api, HWIDInfo } from "../api/daemon";
+import { useT, formatHours, Language } from "../i18n";
 
 type ReqStatus = "idle" | "loading" | "success" | "error";
 
@@ -84,6 +85,7 @@ export default function SettingsPage() {
   const [subURL, setSubURL] = useState(settings.subscription_url ?? "");
   const [subStatus, setSubStatus] = useState<ReqStatus>("idle");
   const [subMsg, setSubMsg] = useState("");
+  const t = useT();
   const [hwid, setHwid] = useState<HWIDInfo | null>(null);
   const [appUpdate, setAppUpdate] = useState<"idle" | "checking" | "downloading">("idle");
   const [appUpdateMsg, setAppUpdateMsg] = useState(`RustleBoost v${APP_VERSION}`);
@@ -92,22 +94,22 @@ export default function SettingsPage() {
   // has already said yes to updating.
   const checkAppUpdate = async () => {
     setAppUpdate("checking");
-    setAppUpdateMsg("Проверяем обновления...");
+    setAppUpdateMsg(t("checking"));
     try {
       const update = await check();
       if (!update?.available) {
         setAppUpdate("idle");
-        setAppUpdateMsg(`Установлена последняя версия — v${APP_VERSION}`);
+        setAppUpdateMsg(`${t("upToDate")} — v${APP_VERSION}`);
         return;
       }
       setAppUpdate("downloading");
-      setAppUpdateMsg(`Загружаем v${update.version}...`);
+      setAppUpdateMsg(`${t("downloadingVersion")} v${update.version}...`);
       await update.downloadAndInstall();
-      setAppUpdateMsg("Готово, перезапускаем...");
+      setAppUpdateMsg(t("restarting"));
       setTimeout(() => relaunch(), 1500);
     } catch {
       setAppUpdate("idle");
-      setAppUpdateMsg("Не удалось проверить обновления");
+      setAppUpdateMsg(t("updateFailed"));
     }
   };
   const [copied, setCopied] = useState(false);
@@ -121,10 +123,10 @@ export default function SettingsPage() {
     setSubStatus("loading"); setSubMsg("");
     try {
       await updateSubscription(url);
-      setSubStatus("success"); setSubMsg("Подписка обновлена");
+      setSubStatus("success"); setSubMsg(t("saved"));
       setTimeout(() => setSubStatus("idle"), 3000);
     } catch (e: any) {
-      setSubStatus("error"); setSubMsg(e?.message ?? "Ошибка обновления");
+      setSubStatus("error"); setSubMsg(e?.message ?? t("errSubscription"));
       setTimeout(() => setSubStatus("idle"), 4000);
     }
   };
@@ -199,20 +201,20 @@ export default function SettingsPage() {
       exit={{ opacity: 0, x: -20 }}
     >
       <div style={{ padding: "8px 16px 4px", flexShrink: 0 }}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Настройки</h2>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>{t("navSettings")}</h2>
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "0 16px 24px" }}>
 
         {/* ── Подписка ── */}
-        <Sec title="Подписка" />
+        <Sec title={t("secSubscription")} />
         <div style={{
           background: "var(--c-surface)",
           border: "1px solid rgba(255,255,255,0.07)",
           borderRadius: 14, padding: 16, marginBottom: 8,
         }}>
           <p style={{ fontSize: 12, color: "var(--c-text-sub)", margin: "0 0 10px" }}>
-            Ключ подписки
+            {t("subscriptionKey")}
           </p>
           <div style={{ display: "flex", gap: 8 }}>
             <input
@@ -262,7 +264,7 @@ export default function SettingsPage() {
         </div>
 
         {/* ── HWID ── */}
-        <Sec title="Устройство (HWID)" />
+        <Sec title={t("secDevice")} />
         <div style={{
           background: "var(--c-surface)",
           border: "1px solid rgba(255,255,255,0.07)",
@@ -300,30 +302,30 @@ export default function SettingsPage() {
                 <span>{hwid.os} {hwid.ver}</span>
               </div>
               <p style={{ fontSize: 11, color: "var(--c-text-dim)", lineHeight: 1.5, margin: 0 }}>
-                Remnawave автоматически зарегистрирует это устройство при первом обновлении подписки.
+                {t("deviceHint")}
               </p>
             </>
           ) : (
-            <p style={{ fontSize: 12, color: "var(--c-text-dim)" }}>Загрузка...</p>
+            <p style={{ fontSize: 12, color: "var(--c-text-dim)" }}>{t("loading")}</p>
           )}
         </div>
 
         {/* ── Маршрутизация ── */}
-        <Sec title="Маршрутизация" />
+        <Sec title={t("secRouting")} />
         <div style={{
           background: "var(--c-surface)",
           border: "1px solid rgba(255,255,255,0.07)",
           borderRadius: 14, padding: 16, marginBottom: 8,
         }}>
           <p style={{ fontSize: 12, color: "var(--c-text-sub)", margin: "0 0 12px" }}>
-            Режим маршрутизации трафика
+            {t("routingMode")}
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {([
-              { value: "all", label: "Весь трафик через VPN", sub: "Все сайты и приложения идут через сервер" },
-              { value: "ru",  label: "RU-сайты напрямую",    sub: ".ru .рф .ру — прямое соединение, VPN для остальных" },
-              { value: "cn",  label: "CN-сайты напрямую",    sub: ".cn .com.cn — прямое соединение, VPN для остальных" },
-            ] as const).map(({ value, label, sub }) => {
+              { value: "all", labelKey: "routeAll", subKey: "routeAllSub" },
+              { value: "ru",  labelKey: "routeRu",  subKey: "routeRuSub" },
+              { value: "cn",  labelKey: "routeCn",  subKey: "routeCnSub" },
+            ] as const).map(({ value, labelKey, subKey }) => {
               const active = settings.route_mode === value;
               return (
                 <button
@@ -346,53 +348,42 @@ export default function SettingsPage() {
                     {active && <div style={{ width: 6, height: 6, borderRadius: "50%", background: "white" }} />}
                   </div>
                   <div style={{ flex: 1 }}>
-                    <p style={{ fontSize: 13, fontWeight: 600, color: active ? "#38bdf8" : "var(--c-text)", margin: 0 }}>{label}</p>
-                    <p style={{ fontSize: 11, color: "var(--c-text-sub)", margin: "2px 0 0" }}>{sub}</p>
+                    <p style={{ fontSize: 13, fontWeight: 600, color: active ? "#38bdf8" : "var(--c-text)", margin: 0 }}>{t(labelKey)}</p>
+                    <p style={{ fontSize: 11, color: "var(--c-text-sub)", margin: "2px 0 0" }}>{t(subKey)}</p>
                   </div>
                 </button>
               );
             })}
           </div>
           <p style={{ fontSize: 11, color: "var(--c-text-dim)", marginTop: 10, lineHeight: 1.5 }}>
-            Применяется при следующем подключении
+            {t("appliesNextConnect")}
           </p>
         </div>
 
         {/* ── Подключение ── */}
-        <Sec title="Подключение" />
+        <Sec title={t("secConnection")} />
 
-        <Row icon={icons.bolt} label="TUN Mode" sub="Системный VPN-интерфейс RustleBoost (все приложения)">
+        <Row icon={icons.bolt} label={t("tunMode")} sub={t("tunModeSub")}>
           <Toggle checked={settings.tun_mode} onChange={toggle("tun_mode")} />
         </Row>
-        <Row icon={icons.shield} label="Kill Switch" sub="Блокировать трафик при разрыве VPN">
+        <Row icon={icons.shield} label={t("killSwitch")} sub={t("killSwitchSub")}>
           <Toggle checked={settings.kill_switch} onChange={toggle("kill_switch")} />
         </Row>
-        <Row icon={icons.link} label="Доступ с локальной сети">
-          <Toggle checked={settings.allow_lan} onChange={toggle("allow_lan")} />
-        </Row>
-        <Row icon={icons.bolt} label="Автоподключение" sub="Подключаться при запуске">
+        <Row icon={icons.bolt} label={t("autoConnect")} sub={t("autoConnectSub")}>
           <Toggle checked={settings.auto_connect} onChange={toggle("auto_connect")} />
         </Row>
 
-        {/* ── DNS ── */}
-        <Sec title="DNS" />
-        <Row icon={icons.globe} label="DNS" sub="Cloudflare DoH через прокси">
-          <span style={{ fontSize: 12, color: "var(--c-text-sub)", padding: "4px 8px" }}>
-            1.1.1.1 (авто)
-          </span>
-        </Row>
-
         {/* ── Обновления ── */}
-        <Sec title="Обновления" />
-        <Row icon={icons.refresh} label="Автообновление подписки">
+        <Sec title={t("secUpdates")} />
+        <Row icon={icons.refresh} label={t("autoUpdateSubscription")}>
           <Toggle checked={settings.auto_update} onChange={toggle("auto_update")} />
         </Row>
-        <Row icon={icons.refresh} label="Интервал">
+        <Row icon={icons.refresh} label={t("interval")}>
           <select value={settings.update_interval} onChange={e => saveSettings({ update_interval: +e.target.value })} style={selectStyle}>
-            {[1, 3, 6, 12, 24].map(h => <option key={h} value={h}>{h}ч</option>)}
+            {[1, 3, 6, 12, 24].map(h => <option key={h} value={h}>{formatHours(settings.language as Language, h)}</option>)}
           </select>
         </Row>
-        <Row icon={icons.refresh} label="Версия приложения" sub={appUpdateMsg}>
+        <Row icon={icons.refresh} label={t("appVersion")} sub={appUpdateMsg}>
           <button
             onClick={checkAppUpdate}
             disabled={appUpdate !== "idle"}
@@ -404,15 +395,15 @@ export default function SettingsPage() {
               whiteSpace: "nowrap",
             }}
           >
-            {appUpdate === "checking" ? "Проверка..."
-              : appUpdate === "downloading" ? "Загрузка..."
-              : "Проверить"}
+            {appUpdate === "checking" ? t("checking")
+              : appUpdate === "downloading" ? t("updateDownloading")
+              : t("checkUpdates")}
           </button>
         </Row>
 
         {/* ── Язык ── */}
-        <Sec title="Интерфейс" />
-        <Row icon={icons.lang} label="Язык">
+        <Sec title={t("secInterface")} />
+        <Row icon={icons.lang} label={t("language")}>
           <select value={settings.language} onChange={e => pick("language")(e.target.value)} style={selectStyle}>
             <option value="ru">Русский</option>
             <option value="en">English</option>

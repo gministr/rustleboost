@@ -2,63 +2,27 @@
  * Flag images via SVG ?raw imports → data URI.
  * This is the only approach that reliably works in Tauri WebView2:
  * CSS url() and asset URL imports from node_modules fail in tauri:// protocol.
+ *
+ * Every flag in the set is pulled in at build time rather than listed by
+ * hand. The hand-written list silently omitted whatever nobody had thought
+ * to add — Spain and the EU among them — and each new location would have
+ * needed a code change to get an icon.
  */
-
-// Import SVG content as raw strings, then convert to data URIs
-import ruRaw from "flag-icons/flags/1x1/ru.svg?raw";
-import nlRaw from "flag-icons/flags/1x1/nl.svg?raw";
-import deRaw from "flag-icons/flags/1x1/de.svg?raw";
-import plRaw from "flag-icons/flags/1x1/pl.svg?raw";
-import fiRaw from "flag-icons/flags/1x1/fi.svg?raw";
-import atRaw from "flag-icons/flags/1x1/at.svg?raw";
-import usRaw from "flag-icons/flags/1x1/us.svg?raw";
-import gbRaw from "flag-icons/flags/1x1/gb.svg?raw";
-import frRaw from "flag-icons/flags/1x1/fr.svg?raw";
-import seRaw from "flag-icons/flags/1x1/se.svg?raw";
-import trRaw from "flag-icons/flags/1x1/tr.svg?raw";
-import jpRaw from "flag-icons/flags/1x1/jp.svg?raw";
-import sgRaw from "flag-icons/flags/1x1/sg.svg?raw";
-import uaRaw from "flag-icons/flags/1x1/ua.svg?raw";
-import czRaw from "flag-icons/flags/1x1/cz.svg?raw";
-import chRaw from "flag-icons/flags/1x1/ch.svg?raw";
-import itRaw from "flag-icons/flags/1x1/it.svg?raw";
-import caRaw from "flag-icons/flags/1x1/ca.svg?raw";
-import auRaw from "flag-icons/flags/1x1/au.svg?raw";
-import noRaw from "flag-icons/flags/1x1/no.svg?raw";
-import dkRaw from "flag-icons/flags/1x1/dk.svg?raw";
-import huRaw from "flag-icons/flags/1x1/hu.svg?raw";
-import roRaw from "flag-icons/flags/1x1/ro.svg?raw";
-import ltRaw from "flag-icons/flags/1x1/lt.svg?raw";
-import lvRaw from "flag-icons/flags/1x1/lv.svg?raw";
-import eeRaw from "flag-icons/flags/1x1/ee.svg?raw";
-import amRaw from "flag-icons/flags/1x1/am.svg?raw";
-import azRaw from "flag-icons/flags/1x1/az.svg?raw";
-import kzRaw from "flag-icons/flags/1x1/kz.svg?raw";
-import mdRaw from "flag-icons/flags/1x1/md.svg?raw";
-import bgRaw from "flag-icons/flags/1x1/bg.svg?raw";
-import hrRaw from "flag-icons/flags/1x1/hr.svg?raw";
-import krRaw from "flag-icons/flags/1x1/kr.svg?raw";
-import hkRaw from "flag-icons/flags/1x1/hk.svg?raw";
-import cnRaw from "flag-icons/flags/1x1/cn.svg?raw";
+const flagFiles = import.meta.glob<string>(
+  "../../node_modules/flag-icons/flags/1x1/*.svg",
+  { query: "?raw", import: "default", eager: true },
+);
 
 function toDataUri(svg: string): string {
   return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
-const FLAG_MAP: Record<string, string> = {
-  ru: toDataUri(ruRaw), nl: toDataUri(nlRaw), de: toDataUri(deRaw),
-  pl: toDataUri(plRaw), fi: toDataUri(fiRaw), at: toDataUri(atRaw),
-  us: toDataUri(usRaw), gb: toDataUri(gbRaw), fr: toDataUri(frRaw),
-  se: toDataUri(seRaw), tr: toDataUri(trRaw), jp: toDataUri(jpRaw),
-  sg: toDataUri(sgRaw), ua: toDataUri(uaRaw), cz: toDataUri(czRaw),
-  ch: toDataUri(chRaw), it: toDataUri(itRaw), ca: toDataUri(caRaw),
-  au: toDataUri(auRaw), no: toDataUri(noRaw), dk: toDataUri(dkRaw),
-  hu: toDataUri(huRaw), ro: toDataUri(roRaw), lt: toDataUri(ltRaw),
-  lv: toDataUri(lvRaw), ee: toDataUri(eeRaw), am: toDataUri(amRaw),
-  az: toDataUri(azRaw), kz: toDataUri(kzRaw), md: toDataUri(mdRaw),
-  bg: toDataUri(bgRaw), hr: toDataUri(hrRaw), kr: toDataUri(krRaw),
-  hk: toDataUri(hkRaw), cn: toDataUri(cnRaw),
-};
+const FLAG_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(flagFiles).map(([path, svg]) => {
+    const code = path.slice(path.lastIndexOf("/") + 1, -".svg".length);
+    return [code, toDataUri(svg)];
+  }),
+);
 
 /** Convert regional-indicator emoji (🇷🇺) → ISO code (ru) */
 export function emojiToCode(emoji: string): string {

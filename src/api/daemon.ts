@@ -124,8 +124,9 @@ export function transportLabel(server: Server): string {
   return parts.join(" · ");
 }
 
+/** Callers handle expire === 0 (no expiry) themselves, so it can be localised. */
 export function formatExpiry(expire: number): string {
-  if (!expire) return "бессрочно";
+  if (!expire) return "";
   return new Date(expire * 1000).toLocaleDateString("ru-RU", {
     day: "2-digit", month: "2-digit", year: "numeric",
   });
