@@ -16,7 +16,7 @@ import (
 // Version is stamped into the log on every start. Without it a log file sent
 // in for diagnosis cannot be tied to the build that produced it, which makes
 // it impossible to tell a fixed bug from a recurring one.
-const Version = "1.3.2"
+const Version = "1.3.3"
 
 func main() {
 	port := flag.String("port", "7777", "API server port")

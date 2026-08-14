@@ -46,6 +46,16 @@ jobs:
         working-directory: daemon
         run: go test ./...
 
+      - name: Generate daemon version resource
+        working-directory: daemon
+        # An executable with no CompanyName, ProductName or version reads as
+        # something built to stay anonymous, and heuristic scanners weight it
+        # accordingly. Regenerated here so it can never drift from
+        # versioninfo.json.
+        run: |
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          goversioninfo -o resource_windows_amd64.syso versioninfo.json
+
       - name: Build daemon
         working-directory: daemon
         env:

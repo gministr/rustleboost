@@ -274,10 +274,6 @@ func (m *Manager) Connect(serverID string) error {
 			engineRussianName(resolvedEngine), other)
 	}
 
-	if settings.TUNMode {
-		go setNetworkCategoryPrivate()
-	}
-
 	m.mu.Lock()
 	m.state = StateConnected
 	m.engine = engine
@@ -734,12 +730,11 @@ func waitForTunnelReady(timeout time.Duration) error {
 	return lastErr
 }
 
-func setNetworkCategoryPrivate() {
-	cmd := `Set-NetConnectionProfile -InterfaceAlias 'RustleBoost' -NetworkCategory Private`
-	out, err := hiddenCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", cmd).CombinedOutput()
-	if err != nil {
-		log.Printf("[nla] Set-NetConnectionProfile failed: %v — %s", err, out)
-	} else {
-		log.Println("[nla] Network category set to Private")
-	}
-}
+// The adapter's network category used to be forced to Private here, by
+// running Set-NetConnectionProfile through PowerShell, so Windows would show
+// the connection as trusted. It only ever affected which firewall profile the
+// adapter fell under — cosmetic — while launching powershell.exe from a
+// hidden, unsigned process is among the strongest signals a behavioural
+// scanner looks for. With FakeIP answering the connectivity check's hostname
+// and the probe travelling through the tunnel, Windows works the status out
+// on its own.

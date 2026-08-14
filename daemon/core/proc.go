@@ -176,20 +176,14 @@ func CleanupStaleCores(dataDir string) {
 // killStaleProcess kills pid only when it is still the core we started —
 // PIDs get recycled, and killing a stranger's process would be worse than
 // leaving ours running.
+//
+// Implemented per-platform against the OS directly rather than by running
+// tasklist and taskkill. Enumerating processes and then terminating one by
+// PID, from a hidden unsigned process, is close enough to what a killer
+// module does that behavioural engines score it; the API calls do the same
+// work without the child processes or their command lines.
 func killStaleProcess(pid int, name string) bool {
-	if runtime.GOOS != "windows" {
-		proc, err := os.FindProcess(pid)
-		if err != nil {
-			return false
-		}
-		return proc.Kill() == nil
-	}
-
-	out, err := hiddenCommand("tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH").Output()
-	if err != nil || !strings.Contains(strings.ToLower(string(out)), name+".exe") {
-		return false
-	}
-	return hiddenCommand("taskkill", "/F", "/PID", strconv.Itoa(pid)).Run() == nil
+	return terminateIfMatches(pid, name)
 }
 
 func (p *procRunner) isRunning() bool { return p.running.Load() }

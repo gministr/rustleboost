@@ -3231,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "rustleboost"
-version = "1.3.2"
+version = "1.3.3"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
