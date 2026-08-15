@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!--
+    Keep this file pure ASCII. Tauri embeds it without its XML declaration,
+    so the manifest parser falls back to the system code page; a non-ASCII
+    byte here can make the whole manifest fail to parse on some locales,
+    which silently drops everything below and is indistinguishable from
+    having no manifest at all.
+  -->
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
@@ -12,4 +19,25 @@
       <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
     </application>
   </compatibility>
+  <!--
+    Required for TaskDialogIndirect and the other themed comctl32 APIs the
+    Tauri runtime calls. Without it Windows loads the v5 comctl32.dll, which
+    has no such export, and the app dies at startup with "entry point not
+    found" before any of its own code runs. tauri-build's default manifest
+    carries this block; supplying a custom manifest replaces that default
+    outright rather than extending it, so omitting this is what broke the
+    previous build.
+  -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
 </assembly>
