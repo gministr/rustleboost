@@ -779,7 +779,7 @@ func waitForTunnelReady(timeout time.Duration) error {
 // on its own.
 
 // preferredTransportHost — узел, на котором WARP проверен через WDTT.
-const preferredTransportHost = "151.243.208.197"
+const preferredTransportHost = "162.141.78.96"
 
 // transportServer выбирает WDTT-сервер из каталога под транспорт WARP.
 func (m *Manager) transportServer() *subscription.Server {
