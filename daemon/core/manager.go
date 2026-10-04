@@ -41,11 +41,14 @@ type Status struct {
 }
 
 type Manager struct {
-	mu          sync.RWMutex
-	dataDir     string
-	store       *storage.Store
-	singbox     *SingBoxRunner
-	xray        *XrayRunner
+	mu      sync.RWMutex
+	dataDir string
+	store   *storage.Store
+	singbox *SingBoxRunner
+	xray    *XrayRunner
+	warp    WarpRunner
+	// catalog — серверы WDTT из каталога RustleBoost: транспорт для WARP.
+	catalog     []subscription.Server
 	prober      *LatencyProber
 	servers     []subscription.Server
 	info        subscription.Info
@@ -83,6 +86,7 @@ func NewManager(dataDir string, store *storage.Store) *Manager {
 type cachePayload struct {
 	Servers []subscription.Server `json:"servers"`
 	Info    subscription.Info     `json:"info"`
+	Catalog []subscription.Server `json:"catalog,omitempty"`
 }
 
 func (m *Manager) loadCache() {
@@ -98,6 +102,7 @@ func (m *Manager) loadCache() {
 	m.mu.Lock()
 	m.servers = payload.Servers
 	m.info = payload.Info
+	m.catalog = payload.Catalog
 	m.mu.Unlock()
 
 	log.Printf("Loaded %d servers from cache", len(payload.Servers))
@@ -105,7 +110,7 @@ func (m *Manager) loadCache() {
 
 func (m *Manager) saveCache() {
 	m.mu.RLock()
-	payload := cachePayload{Servers: m.servers, Info: m.info}
+	payload := cachePayload{Servers: m.servers, Info: m.info, Catalog: m.catalog}
 	m.mu.RUnlock()
 
 	data, err := json.Marshal(payload)
@@ -201,7 +206,19 @@ func (m *Manager) Connect(serverID string) error {
 	}
 
 	engine := "sing-box"
-	if config.NeedsXray(selected) {
+	if config.NeedsWarp(selected) {
+		engine = "sing-box + warp"
+		transport := m.transportServer()
+		if transport == nil {
+			return m.failConnect(fmt.Errorf("WARP: в каталоге нет WDTT-сервера — обновите подписку"))
+		}
+		if err := m.warp.Start(m.dataDir, *transport, config.XraySocksPort, GetHWIDInfo().HWID, false); err != nil {
+			return m.failConnect(fmt.Errorf("warp: %w", err))
+		}
+		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
+			return m.failConnect(fmt.Errorf("warp: порт %d не открылся: %w", config.XraySocksPort, err))
+		}
+	} else if config.NeedsXray(selected) {
 		engine = "sing-box + xray"
 
 		xrayCfg, err := config.GenerateXray(selected, opts)
@@ -214,7 +231,7 @@ func (m *Manager) Connect(serverID string) error {
 		// sing-box forwards into Xray's SOCKS port; starting the tunnel
 		// before that port accepts would fail the first connections.
 		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
-			m.xray.Stop()
+			m.stopChains()
 			return m.failConnect(fmt.Errorf("xray did not open port %d: %w\n%s",
 				config.XraySocksPort, err, m.xray.LogTail(6)))
 		}
@@ -222,11 +239,11 @@ func (m *Manager) Connect(serverID string) error {
 
 	sbCfg, err := config.Generate(selected, opts)
 	if err != nil {
-		m.xray.Stop()
+		m.stopChains()
 		return m.failConnect(fmt.Errorf("generate config: %w", err))
 	}
 	if err := m.singbox.Start(sbCfg); err != nil {
-		m.xray.Stop()
+		m.stopChains()
 		return m.failConnect(fmt.Errorf("sing-box: %w", err))
 	}
 
@@ -257,7 +274,7 @@ func (m *Manager) Connect(serverID string) error {
 	session := m.session
 	m.mu.Unlock()
 
-	go m.watchCores(session, config.NeedsXray(selected), opts)
+	go m.watchCores(session, config.NeedsXray(selected) || config.NeedsWarp(selected), opts)
 
 	m.store.UpdateSettings(func(s *storage.Settings) {
 		s.LastServerID = serverID
@@ -291,7 +308,7 @@ func (m *Manager) watchCores(session uint64, usesXray bool, opts config.Options)
 			return
 		}
 
-		if m.singbox.IsRunning() && (!usesXray || m.xray.IsRunning()) {
+		if m.singbox.IsRunning() && (!usesXray || m.chainRunning()) {
 			continue
 		}
 
@@ -305,7 +322,7 @@ func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options) {
 	killSwitch := m.store.GetSettings().KillSwitch
 
 	m.singbox.Stop()
-	m.xray.Stop()
+	m.stopChains()
 	ClearSystemProxy()
 
 	message := "соединение с сервером прервано"
@@ -337,7 +354,7 @@ func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options) {
 // the reason so the UI can show it instead of a bare "connection failed".
 func (m *Manager) failConnect(err error) error {
 	m.singbox.Stop()
-	m.xray.Stop()
+	m.stopChains()
 	ClearSystemProxy()
 
 	m.mu.Lock()
@@ -364,7 +381,7 @@ func (m *Manager) Disconnect() error {
 	if err := m.singbox.Stop(); err != nil {
 		log.Printf("Stop sing-box: %v", err)
 	}
-	if err := m.xray.Stop(); err != nil {
+	if err := m.stopChains(); err != nil {
 		log.Printf("Stop xray: %v", err)
 	}
 	ClearSystemProxy()
@@ -410,6 +427,21 @@ func (m *Manager) UpdateSubscription(subURL string) error {
 	})
 	if err != nil {
 		return translateSubscriptionError(err)
+	}
+
+	// Каталог нужен только для транспорта WARP: неудача не должна ломать
+	// подписку, поэтому старый каталог остаётся на месте.
+	if catalog, err := subscription.FetchCatalog(ctx, subURL, subscription.HWIDHeaders{
+		HWID: hwid.HWID, OS: hwid.OS, OSVer: hwid.OSVer, Model: hwid.Model,
+	}); err != nil {
+		log.Printf("[catalog] не обновился: %v", err)
+	} else {
+		m.mu.Lock()
+		m.catalog = catalog
+		m.mu.Unlock()
+	}
+	if m.transportServer() != nil {
+		result.Servers = append(result.Servers, subscription.WarpServer())
 	}
 
 	m.mu.Lock()
@@ -567,6 +599,9 @@ func (m *Manager) PingServer(serverID string) (int, error) {
 	if target == nil {
 		return -1, fmt.Errorf("server not found")
 	}
+	if target.Engine == subscription.EngineWarp {
+		return -1, nil
+	}
 
 	results := m.prober.Measure([]subscription.Server{*target})
 	latency, ok := results[serverID]
@@ -580,8 +615,12 @@ func (m *Manager) PingServer(serverID string) (int, error) {
 
 func (m *Manager) PingAll() {
 	m.mu.RLock()
-	servers := make([]subscription.Server, len(m.servers))
-	copy(servers, m.servers)
+	servers := make([]subscription.Server, 0, len(m.servers))
+	for _, s := range m.servers {
+		if s.Engine != subscription.EngineWarp {
+			servers = append(servers, s)
+		}
+	}
 	m.mu.RUnlock()
 
 	if len(servers) == 0 {
@@ -683,4 +722,35 @@ func setNetworkCategoryPrivate() {
 	} else {
 		log.Println("[nla] Network category set to Private")
 	}
+}
+
+// preferredTransportHost — узел, на котором WARP проверен через WDTT.
+const preferredTransportHost = "151.243.208.197"
+
+// transportServer выбирает WDTT-сервер из каталога под транспорт WARP.
+func (m *Manager) transportServer() *subscription.Server {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var first *subscription.Server
+	for i := range m.catalog {
+		s := m.catalog[i]
+		if s.Address == preferredTransportHost {
+			return &s
+		}
+		if first == nil {
+			first = &s
+		}
+	}
+	return first
+}
+
+// chainRunning — поднято ли ядро, которое проксирует трафик в sing-box.
+func (m *Manager) chainRunning() bool {
+	return m.xray.IsRunning() || m.warp.IsRunning()
+}
+
+// stopChains снимает WARP и Xray: сторож и отключение работают с обоими.
+func (m *Manager) stopChains() error {
+	m.warp.Stop()
+	return m.xray.Stop()
 }

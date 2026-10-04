@@ -305,7 +305,7 @@ func splitLines(s string) []string {
 func looksLikeProxyURI(s string) bool {
 	for _, prefix := range []string{
 		"vless://", "vmess://", "trojan://", "ss://",
-		"hysteria2://", "hy2://", "tuic://", "naive+",
+		"hysteria2://", "hy2://", "tuic://", "naive+", "wdtt://", "vkturn://",
 	} {
 		if strings.HasPrefix(s, prefix) {
 			return true
@@ -345,6 +345,8 @@ func parseURI(raw string) (Server, error) {
 		return parseTUIC(raw)
 	case strings.HasPrefix(raw, "naive+"):
 		return parseNaive(raw)
+	case strings.HasPrefix(raw, "wdtt://"), strings.HasPrefix(raw, "vkturn://"):
+		return parseWdtt(raw)
 	default:
 		return Server{}, fmt.Errorf("unsupported protocol")
 	}

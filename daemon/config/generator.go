@@ -304,6 +304,12 @@ func NeedsXray(server subscription.Server) bool {
 	return server.Engine == subscription.EngineXray && len(server.Outbound) > 0
 }
 
+// NeedsWarp — пункт WARP: трафик идёт через движок WARP демона, а sing-box
+// видит его на том же SOCKS-порту, что и Xray.
+func NeedsWarp(server subscription.Server) bool {
+	return server.Engine == subscription.EngineWarp
+}
+
 // Generate builds the sing-box side.
 func Generate(server subscription.Server, opts Options) (*SingBoxConfig, error) {
 	proxyOut, err := buildProxyOutbound(server)
@@ -419,8 +425,14 @@ func buildRoute(server subscription.Server, opts Options) RouteConfig {
 		// Everything the cores themselves send must bypass the tunnel,
 		// otherwise the proxy leg is routed back into TUN and deadlocks. This
 		// covers nodes addressed by bare IP, which a domain rule cannot match.
+		processes := []string{"xray.exe", "sing-box.exe"}
+		if NeedsWarp(server) {
+			// Движок WARP живёт внутри демона, и его сокеты (VK-релеи, узел WDTT,
+			// регистрация) тоже должны миновать TUN, иначе транспорт уйдёт сам в себя.
+			processes = append(processes, "daemon.exe")
+		}
 		rules = append(rules, RouteRule{
-			ProcessName: []string{"xray.exe", "sing-box.exe"},
+			ProcessName: processes,
 			Outbound:    "direct",
 		})
 
@@ -478,7 +490,7 @@ func buildInbounds(opts Options) []interface{} {
 			InterfaceName: "RustleBoost",
 			Address:       []string{"172.19.0.1/30"},
 			MTU:           1500,
-			AutoRoute: true,
+			AutoRoute:     true,
 			// Windows decides an interface is online by probing through it.
 			// With strict_route off, its probes went out the physical NIC
 			// instead, so the adapter kept reporting "No Internet" the whole
@@ -494,7 +506,7 @@ func buildInbounds(opts Options) []interface{} {
 // ── Outbound builders ─────────────────────────────────────────────────────
 
 func buildProxyOutbound(server subscription.Server) (interface{}, error) {
-	if NeedsXray(server) {
+	if NeedsXray(server) || NeedsWarp(server) {
 		return SocksOutbound{
 			Type:       "socks",
 			Tag:        "proxy",
