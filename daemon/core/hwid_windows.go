@@ -5,7 +5,10 @@ package core
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"strings"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 // HWIDInfo holds device identification data sent to Remnawave.
@@ -25,103 +28,64 @@ func GetHWIDInfo() HWIDInfo {
 	}
 }
 
-// machineID reads MachineGuid from Windows registry — reliable on all Windows versions.
-// Falls back to disk serial hash if registry read fails.
-func machineID() string {
-	// Primary: Windows registry MachineGuid (always present, UUID format, ≤36 chars)
-	out, err := hiddenCommand(
-		"reg", "query",
-		`HKLM\SOFTWARE\Microsoft\Cryptography`,
-		"/v", "MachineGuid",
-	).Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.Contains(line, "MachineGuid") {
-				parts := strings.Fields(line)
-				if len(parts) >= 3 {
-					guid := strings.TrimSpace(parts[len(parts)-1])
-					if len(guid) >= 32 {
-						if len(guid) > 36 {
-							guid = guid[:36]
-						}
-						return strings.ToUpper(guid)
-					}
-				}
-			}
-		}
+// These values are read through the registry API instead of by running
+// reg.exe and parsing its console output. Beyond being more robust — no
+// locale-dependent text to scrape — it removes a burst of child processes
+// that a hidden, unsigned executable fires off at startup, which is a shape
+// behavioural scanners treat as reconnaissance.
+func readRegistryString(root registry.Key, path, name string) (string, bool) {
+	key, err := registry.OpenKey(root, path, registry.QUERY_VALUE)
+	if err != nil {
+		return "", false
 	}
+	defer key.Close()
 
-	// Fallback: SHA256 of disk serial (32 hex chars)
-	return diskSerialHash()
+	value, _, err := key.GetStringValue(name)
+	if err != nil {
+		return "", false
+	}
+	value = strings.TrimSpace(value)
+	return value, value != ""
 }
 
-func diskSerialHash() string {
-	out, err := hiddenCommand(
-		"reg", "query",
-		`HKLM\HARDWARE\DESCRIPTION\System\BIOS`,
-		"/v", "SystemSerialNumber",
-	).Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.Contains(line, "SystemSerialNumber") {
-				parts := strings.Fields(strings.TrimSpace(line))
-				if len(parts) >= 3 {
-					serial := parts[len(parts)-1]
-					if serial != "" && serial != "(null)" {
-						h := sha256.Sum256([]byte(serial))
-						return fmt.Sprintf("%X", h[:16])
-					}
-				}
-			}
+// machineID reads MachineGuid, which is present on every Windows install and
+// already in UUID form. Falls back to a hash of hardware identifiers.
+func machineID() string {
+	if guid, ok := readRegistryString(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Cryptography`, "MachineGuid"); ok && len(guid) >= 32 {
+		if len(guid) > 36 {
+			guid = guid[:36]
 		}
+		return strings.ToUpper(guid)
+	}
+	return fallbackID()
+}
+
+func fallbackID() string {
+	if serial, ok := readRegistryString(registry.LOCAL_MACHINE,
+		`HARDWARE\DESCRIPTION\System\BIOS`, "SystemSerialNumber"); ok && serial != "(null)" {
+		h := sha256.Sum256([]byte(serial))
+		return fmt.Sprintf("%X", h[:16])
 	}
 
-	// Last resort: hostname hash
-	hostname, _ := hiddenCommand("hostname").Output()
-	h := sha256.Sum256(hostname)
+	hostname, _ := os.Hostname()
+	h := sha256.Sum256([]byte(hostname))
 	return fmt.Sprintf("%X", h[:16])
 }
 
 func windowsVersion() string {
-	// Read from registry — more reliable than cmd /c ver
-	out, err := hiddenCommand(
-		"reg", "query",
-		`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`,
-		"/v", "DisplayVersion",
-	).Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.Contains(line, "DisplayVersion") {
-				parts := strings.Fields(strings.TrimSpace(line))
-				if len(parts) >= 3 {
-					return parts[len(parts)-1]
-				}
-			}
-		}
+	if version, ok := readRegistryString(registry.LOCAL_MACHINE,
+		`SOFTWARE\Microsoft\Windows NT\CurrentVersion`, "DisplayVersion"); ok {
+		return version
 	}
 	return "11"
 }
 
 func machineModel() string {
-	out, err := hiddenCommand(
-		"reg", "query",
-		`HKLM\HARDWARE\DESCRIPTION\System\BIOS`,
-		"/v", "SystemProductName",
-	).Output()
-	if err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if strings.Contains(line, "SystemProductName") {
-				parts := strings.Fields(strings.TrimSpace(line))
-				if len(parts) >= 3 {
-					model := strings.Join(parts[2:], " ")
-					model = strings.TrimSpace(model)
-					if model != "" && !strings.EqualFold(model, "System Product Name") {
-						return model
-					}
-				}
-			}
-		}
+	model, ok := readRegistryString(registry.LOCAL_MACHINE,
+		`HARDWARE\DESCRIPTION\System\BIOS`, "SystemProductName")
+	if ok && !strings.EqualFold(model, "System Product Name") {
+		return model
 	}
 	return "Windows PC"
 }

@@ -22,6 +22,11 @@ type Settings struct {
 	Language       string `json:"language"`
 	TUNMode        bool   `json:"tun_mode"`
 	RouteMode      string `json:"route_mode"` // "all" | "ru" | "cn"
+	// RouterMode picks which core carries proxy traffic. Which one gets
+	// through varies by network — a censor can fingerprint and block one
+	// implementation's handshake while letting the other through — so this
+	// is a user choice, not something the app should decide on its own.
+	RouterMode string `json:"router_mode"` // "auto" | "singbox" | "xray"
 }
 
 type Store struct {
@@ -44,6 +49,11 @@ func New(path string) *Store {
 			// Russian sites go direct by default: they are the ones that get
 			// slower or refuse foreign addresses outright when tunnelled.
 			RouteMode: "ru",
+			// Xray by default. It is the path that has actually connected on
+			// every machine tested so far; sing-box works for some people and
+			// not others, and there is no way to tell which from here. The
+			// switch in Settings is there for anyone it doesn't suit.
+			RouterMode: "xray",
 		},
 	}
 }

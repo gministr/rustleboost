@@ -52,6 +52,7 @@ const defaultSettings: Settings = {
   language: "ru",
   tun_mode: true,
   route_mode: "ru",
+  router_mode: "auto",
 };
 
 export const useVPNStore = create<VPNStore>((set, get) => ({

@@ -21,6 +21,57 @@ const (
 		"&security=tls&sni=cdn.example.com&fp=chrome&alpn=h2#%F0%9F%87%B3%F0%9F%87%B1%20LTE%20%7C%20NL"
 )
 
+// Which core actually carries a node is a user setting, not something the
+// app decides — the same network can block one implementation's handshake
+// and let the other through, and only the user's own trial and error can
+// tell which. ResolveEngine must honour an explicit override even where
+// automatic selection would pick the other core, and refuse rather than
+// silently misconfigure the one combination that is genuinely impossible.
+func TestResolveEngineHonoursOverride(t *testing.T) {
+	grpc := parseOne(t, grpcRealityURI) // sing-box-capable
+	xhttp := parseOne(t, xhttpTLSURI)   // Xray-only
+
+	cases := []struct {
+		name   string
+		server subscription.Server
+		mode   string
+		want   string
+	}{
+		{"grpc auto picks singbox", grpc, RouterAuto, subscription.EngineSingBox},
+		{"grpc forced to singbox stays singbox", grpc, RouterSingBox, subscription.EngineSingBox},
+		{"grpc forced to xray goes to xray", grpc, RouterXray, subscription.EngineXray},
+		{"xhttp auto picks xray", xhttp, RouterAuto, subscription.EngineXray},
+		{"xhttp forced to xray stays xray", xhttp, RouterXray, subscription.EngineXray},
+		// ResolveEngine honours the forced choice literally even though this
+		// specific node cannot actually run on it; Generate() is what turns
+		// that into a clear refusal (see TestSingBoxOnlyModeRejectsXHTTPNode).
+		{"xhttp forced to singbox resolves there — Generate() must reject it", xhttp, RouterSingBox, subscription.EngineSingBox},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ResolveEngine(c.server, c.mode)
+			if got != c.want {
+				t.Errorf("ResolveEngine(mode=%s) = %q, want %q", c.mode, got, c.want)
+			}
+		})
+	}
+}
+
+// Forcing "только sing-box" against an XHTTP-only node must fail loudly, not
+// build a config that quietly treats XHTTP as plain TCP and then times out
+// with no explanation of why.
+func TestSingBoxOnlyModeRejectsXHTTPNode(t *testing.T) {
+	xhttp := parseOne(t, xhttpTLSURI)
+
+	_, err := Generate(xhttp, Options{TUNMode: true, RouterMode: RouterSingBox})
+	if err == nil {
+		t.Fatal("expected an error forcing sing-box-only mode onto an XHTTP node")
+	}
+	if !strings.Contains(err.Error(), "Xray") {
+		t.Errorf("error should point the user at the Xray/Auto setting, got: %v", err)
+	}
+}
+
 func parseOne(t *testing.T, uri string) subscription.Server {
 	t.Helper()
 	servers, err := subscription.Parse([]byte(uri))
@@ -33,35 +84,75 @@ func parseOne(t *testing.T, uri string) subscription.Server {
 	return servers[0]
 }
 
+// sing-box has its own native VLESS/gRPC/Reality implementation, verified
+// directly against the bundled binary (see buildTransport / buildTLS in
+// generator.go). A node using it does not need Xray running at all — one
+// fewer process that can be blocked by a firewall or fail its own DNS
+// lookup, which is exactly the failure mode that surfaced when every node
+// was forced through Xray regardless of transport.
 func TestParseGRPCReality(t *testing.T) {
 	s := parseOne(t, grpcRealityURI)
 
 	if s.Transport != "grpc" || s.Security != "reality" {
 		t.Errorf("transport/security = %q/%q, want grpc/reality", s.Transport, s.Security)
 	}
-	if s.Engine != subscription.EngineXray {
-		t.Errorf("engine = %q, want %q", s.Engine, subscription.EngineXray)
+	if s.Engine != subscription.EngineSingBox {
+		t.Errorf("engine = %q, want %q (sing-box implements grpc+reality natively)", s.Engine, subscription.EngineSingBox)
 	}
 	if s.Country != "Poland" {
 		t.Errorf("country = %q, want Poland (from flag emoji)", s.Country)
 	}
 
-	var ob struct {
-		Stream struct {
-			GRPC struct {
-				ServiceName string `json:"serviceName"`
-			} `json:"grpcSettings"`
-			Reality struct {
-				PublicKey string `json:"publicKey"`
-				ShortID   string `json:"shortId"`
-			} `json:"realitySettings"`
-		} `json:"streamSettings"`
+	if s.Params["pbk"] != "TEST_PUBLIC_KEY" || s.Params["sid"] != "abcd1234" {
+		t.Errorf("reality params lost: pbk=%q sid=%q", s.Params["pbk"], s.Params["sid"])
 	}
-	if err := json.Unmarshal(s.Outbound, &ob); err != nil {
-		t.Fatalf("decode outbound: %v", err)
+}
+
+// Regression guard for a bug that shipped: the /v2ray-json path never set
+// params["security"], so buildTLS fell through to nil and produced a VLESS
+// outbound with no tls block — plaintext against a Reality endpoint, which
+// cannot connect on any network. `sing-box check` passed it, because tls is
+// optional in the schema, so schema validation could not catch it. Assert on
+// the generated outbound's actual contents instead.
+func TestNativeOutboundKeepsRealityFromV2RayJSON(t *testing.T) {
+	// Shaped exactly like a Remnawave /v2ray-json entry.
+	payload := `[{"remarks":"Wi-Fi | Test","outbounds":[{
+		"tag":"proxy","protocol":"vless",
+		"settings":{"vnext":[{"address":"node.example.com","port":8443,
+			"users":[{"id":"11111111-2222-3333-4444-555555555555","encryption":"none","flow":""}]}]},
+		"streamSettings":{"network":"grpc","security":"reality",
+			"grpcSettings":{"serviceName":""},
+			"realitySettings":{"serverName":"www.example.com","publicKey":"TEST_PUBLIC_KEY",
+				"shortId":"abcd1234","fingerprint":"chrome"}}}]}]`
+
+	servers, err := subscription.Parse([]byte(payload))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
 	}
-	if ob.Stream.Reality.PublicKey != "TEST_PUBLIC_KEY" || ob.Stream.Reality.ShortID != "abcd1234" {
-		t.Errorf("reality settings lost: %+v", ob.Stream.Reality)
+	if len(servers) != 1 {
+		t.Fatalf("got %d servers, want 1", len(servers))
+	}
+
+	cfg, err := Generate(servers[0], Options{TUNMode: true, RouterMode: RouterSingBox})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	out, ok := cfg.Outbounds[0].(VLESSOutbound)
+	if !ok {
+		t.Fatalf("proxy outbound is %T, want VLESSOutbound", cfg.Outbounds[0])
+	}
+	if out.TLS == nil {
+		t.Fatal("no tls block — the node would get plaintext VLESS and never connect")
+	}
+	if out.TLS.Reality == nil || out.TLS.Reality.PublicKey != "TEST_PUBLIC_KEY" {
+		t.Fatalf("reality lost: %+v", out.TLS.Reality)
+	}
+	if out.TLS.ServerName != "www.example.com" {
+		t.Errorf("server_name = %q, want www.example.com", out.TLS.ServerName)
+	}
+	if out.TLS.UTLS == nil || out.TLS.UTLS.Fingerprint != "chrome" {
+		t.Errorf("utls fingerprint lost: %+v", out.TLS.UTLS)
 	}
 }
 
@@ -117,6 +208,115 @@ func TestSingBoxDelegatesToXray(t *testing.T) {
 	}
 	if out.ServerPort != XraySocksPort || out.Tag != "proxy" {
 		t.Errorf("socks outbound = %+v", out)
+	}
+}
+
+// A node sing-box implements natively must never touch Xray: routing it
+// through the SOCKS bridge anyway is what left every server unreachable on a
+// machine where something (firewall, DNS, whatever) breaks the Xray process
+// specifically, even though sing-box's own tunnel worked fine there.
+func TestGRPCRealityBuildsWithoutXray(t *testing.T) {
+	s := parseOne(t, grpcRealityURI)
+
+	if NeedsXray(s) {
+		t.Fatal("NeedsXray = true for a grpc+reality node sing-box supports natively")
+	}
+
+	cfg, err := Generate(s, Options{TUNMode: true, RouteMode: "all"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	out, ok := cfg.Outbounds[0].(VLESSOutbound)
+	if !ok {
+		t.Fatalf("proxy outbound is %T, want VLESSOutbound", cfg.Outbounds[0])
+	}
+	if out.UUID != "11111111-2222-3333-4444-555555555555" {
+		t.Errorf("uuid = %q", out.UUID)
+	}
+	if out.TLS == nil || out.TLS.Reality == nil {
+		t.Fatal("no reality block")
+	}
+	if out.TLS.Reality.PublicKey != "TEST_PUBLIC_KEY" || out.TLS.Reality.ShortID != "abcd1234" {
+		t.Errorf("reality = %+v", out.TLS.Reality)
+	}
+	if out.Transport == nil || out.Transport.Type != "grpc" {
+		t.Fatalf("transport = %+v, want grpc", out.Transport)
+	}
+
+	for _, ob := range cfg.Outbounds {
+		if _, isSocks := ob.(SocksOutbound); isSocks {
+			t.Fatal("a socks bridge to Xray was generated for a native-only node")
+		}
+	}
+}
+
+// Regression guard for the failure that made the app useless on a network
+// where 1.1.1.1 is blocked: every lookup went to DNS-over-HTTPS there, so
+// each one died on a ten second timeout and nothing resolved, even though
+// the tunnel itself was up and passing the readiness probe. Name resolution
+// must not depend on reaching any single fixed upstream.
+func TestDNSUsesFakeIPAndNoFixedUpstream(t *testing.T) {
+	s := parseOne(t, xhttpTLSURI)
+
+	cfg, err := Generate(s, Options{TUNMode: true, RouteMode: "ru", RouterMode: RouterXray})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	var hasFakeIP bool
+	for _, server := range cfg.DNS.Servers {
+		switch server.Type {
+		case "fakeip":
+			hasFakeIP = true
+		default:
+			// sing-box refuses to start with a detour pointing at a plain
+			// direct outbound: "detour to an empty direct outbound makes no
+			// sense". `sing-box check` accepts it regardless, so this is
+			// asserted here rather than left to schema validation.
+			if server.Detour != "" {
+				t.Errorf("DNS server %q sets detour %q — the core refuses to start with it",
+					server.Tag, server.Detour)
+			}
+		}
+	}
+	if !hasFakeIP {
+		t.Fatal("no fakeip server: lookups would need a reachable upstream")
+	}
+
+	var addressLookups, xrayLookups, nodeLookups string
+	for _, rule := range cfg.DNS.Rules {
+		for _, q := range rule.QueryType {
+			if q == "A" {
+				addressLookups = rule.Server
+			}
+		}
+		for _, p := range rule.ProcessName {
+			if p == "xray.exe" {
+				xrayLookups = rule.Server
+			}
+		}
+		for _, d := range rule.Domain {
+			if d == s.Address {
+				nodeLookups = rule.Server
+			}
+		}
+	}
+
+	if addressLookups != "fakeip-dns" {
+		t.Errorf("A lookups go to %q, want fakeip-dns", addressLookups)
+	}
+	// Xray dials the node itself; a placeholder address would send it back
+	// into the tunnel it is carrying.
+	if xrayLookups != "local-dns" {
+		t.Errorf("Xray's lookups go to %q, want local-dns", xrayLookups)
+	}
+	// The node's own hostname must resolve for real or the tunnel never rises.
+	if nodeLookups != "local-dns" {
+		t.Errorf("node hostname lookups go to %q, want local-dns", nodeLookups)
+	}
+	if cfg.Route.DefaultDomainResolver == "fakeip-dns" {
+		t.Error("outbounds would dial placeholder addresses")
 	}
 }
 
@@ -192,8 +392,12 @@ func TestRouteHijacksDNSInTunnelMode(t *testing.T) {
 	if !ok {
 		t.Fatalf("second inbound is %T, want TUNInbound", cfg.Inbounds[1])
 	}
-	if !tun.StrictRoute {
-		t.Error("strict_route off — system probes bypass the tunnel")
+	// On Windows this installs filters that drop traffic outside the tunnel,
+	// which included the replies to DNS queries sent from the physical
+	// interface — every lookup timed out on a machine whose router was
+	// answering normally. FakeIP covers what it was originally turned on for.
+	if tun.StrictRoute {
+		t.Error("strict_route on — DNS replies arriving outside the tunnel get dropped")
 	}
 }
 

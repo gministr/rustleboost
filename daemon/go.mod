@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/google/uuid v1.6.0
 	golang.org/x/crypto v0.55.0
+	golang.org/x/sys v0.47.0
 	rustleboost/vkturn v0.0.0
 )
 
@@ -30,7 +31,6 @@ require (
 	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.10.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect

@@ -1,6 +1,7 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { RefreshCw, Wifi, Globe, ArrowDown, ArrowUp } from "lucide-react";
+import { RefreshCw, Wifi, Globe, ArrowDown, ArrowUp, AlertTriangle } from "lucide-react";
 import { useVPNStore } from "../store/vpnStore";
 import ConnectionButton from "../components/ConnectionButton";
 import ServerCard from "../components/ServerCard";
@@ -28,8 +29,9 @@ export default function MainPage() {
     error, clearError, updateSubscription, settings, info,
     fetchServers, pingAll,
   } = useVPNStore();
-  const { state, server, stats } = status;
+  const { state, server, stats, warning } = status;
   const t = useT();
+  const navigate = useNavigate();
 
   const [refreshing, setRefreshing]   = useState(false);
   const [pinging, setPinging]         = useState(false);
@@ -94,6 +96,40 @@ export default function MainPage() {
           >
             <span style={{ color: "#f87171", fontSize: 12, flex: 1, lineHeight: 1.5 }}>{error}</span>
             <button onClick={clearError} style={{ color: "rgba(248,113,113,0.6)", fontSize: 12, background: "none", border: "none", cursor: "pointer" }}>✕</button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Shown when "connected" could not be verified — the one failure mode
+          a user cannot self-diagnose without a hint pointing at the fix. */}
+      <AnimatePresence>
+        {!error && warning && state === "connected" && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+            style={{
+              margin: "8px 16px 0",
+              padding: "10px 14px",
+              borderRadius: 12,
+              background: "rgba(250,204,21,0.1)",
+              border: "1px solid rgba(250,204,21,0.25)",
+              display: "flex", alignItems: "flex-start", gap: 8,
+              flexShrink: 0,
+            }}
+          >
+            <AlertTriangle size={13} style={{ color: "#facc15", flexShrink: 0, marginTop: 1 }} />
+            <div style={{ flex: 1 }}>
+              <p style={{ color: "#facc15", fontSize: 12, lineHeight: 1.5, margin: 0 }}>{warning}</p>
+              <button
+                onClick={() => navigate("/settings")}
+                style={{
+                  marginTop: 4, fontSize: 12, fontWeight: 600, color: "#facc15",
+                  background: "none", border: "none", cursor: "pointer", padding: 0,
+                  textDecoration: "underline",
+                }}
+              >
+                {t("goToSettings")}
+              </button>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

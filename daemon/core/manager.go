@@ -38,15 +38,19 @@ type Status struct {
 	Stats  Stats                `json:"stats"`
 	Engine string               `json:"engine,omitempty"`
 	Error  string               `json:"error,omitempty"`
+	// Warning is set when the app reports "connected" but could not verify
+	// the tunnel actually carries traffic — a state the user cannot tell
+	// apart from a working connection without this hint.
+	Warning string `json:"warning,omitempty"`
 }
 
 type Manager struct {
-	mu      sync.RWMutex
-	dataDir string
-	store   *storage.Store
-	singbox *SingBoxRunner
-	xray    *XrayRunner
-	warp    WarpRunner
+	mu          sync.RWMutex
+	dataDir     string
+	store       *storage.Store
+	singbox     *SingBoxRunner
+	xray        *XrayRunner
+	warp        WarpRunner
 	// catalog — серверы WDTT из каталога RustleBoost: транспорт для WARP.
 	catalog     []subscription.Server
 	prober      *LatencyProber
@@ -56,6 +60,7 @@ type Manager struct {
 	state       ConnectionState
 	engine      string
 	lastError   string
+	lastWarning string
 	session     uint64 // bumped per connect; identifies the live watchdog
 	connectedAt time.Time
 	subCancel   context.CancelFunc
@@ -101,8 +106,8 @@ func (m *Manager) loadCache() {
 
 	m.mu.Lock()
 	m.servers = payload.Servers
-	m.info = payload.Info
 	m.catalog = payload.Catalog
+	m.info = payload.Info
 	m.mu.Unlock()
 
 	log.Printf("Loaded %d servers from cache", len(payload.Servers))
@@ -129,10 +134,11 @@ func (m *Manager) GetStatus() Status {
 	defer m.mu.RUnlock()
 
 	status := Status{
-		State:  m.state,
-		Server: m.current,
-		Engine: m.engine,
-		Error:  m.lastError,
+		State:   m.state,
+		Server:  m.current,
+		Engine:  m.engine,
+		Error:   m.lastError,
+		Warning: m.lastWarning,
 	}
 
 	if m.state == StateConnected && !m.connectedAt.IsZero() {
@@ -195,18 +201,27 @@ func (m *Manager) Connect(serverID string) error {
 	m.state = StateConnecting
 	m.current = &selected
 	m.lastError = ""
+	m.lastWarning = ""
 	m.mu.Unlock()
 
 	settings := m.store.GetSettings()
 	opts := config.Options{
-		TUNMode:   settings.TUNMode,
-		RouteMode: settings.RouteMode,
-		DNSMode:   settings.DNSMode,
-		AllowLAN:  settings.AllowLAN,
+		TUNMode:    settings.TUNMode,
+		RouteMode:  settings.RouteMode,
+		DNSMode:    settings.DNSMode,
+		AllowLAN:   settings.AllowLAN,
+		RouterMode: settings.RouterMode,
+		// Both read now, while the system resolver still works normally. Once
+		// the tunnel is up these names answer with placeholder addresses, and
+		// the adapter's own DNS entries would point back into the tunnel.
+		ServerIPs: resolveHost(selected.Address),
+		SystemDNS: SystemDNSServers(),
 	}
+	resolvedEngine := config.ResolveEngine(selected, opts.RouterMode)
+	usesXray := resolvedEngine == subscription.EngineXray
 
 	engine := "sing-box"
-	if config.NeedsWarp(selected) {
+	if resolvedEngine == subscription.EngineWarp {
 		engine = "sing-box + warp"
 		transport := m.transportServer()
 		if transport == nil {
@@ -218,7 +233,7 @@ func (m *Manager) Connect(serverID string) error {
 		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
 			return m.failConnect(fmt.Errorf("warp: порт %d не открылся: %w", config.XraySocksPort, err))
 		}
-	} else if config.NeedsXray(selected) {
+	} else if usesXray {
 		engine = "sing-box + xray"
 
 		xrayCfg, err := config.GenerateXray(selected, opts)
@@ -258,23 +273,34 @@ func (m *Manager) Connect(serverID string) error {
 	// reporting "connected" the moment they start leaves the user staring at
 	// a green screen while nothing loads. Hold the state until real traffic
 	// makes it through.
+	tunnelWarning := ""
 	if err := waitForTunnelReady(tunnelReadyTimeout); err != nil {
 		log.Printf("[connect] tunnel not verified within %s: %v", tunnelReadyTimeout, err)
-	}
-
-	if settings.TUNMode {
-		go setNetworkCategoryPrivate()
+		// This is the one symptom a user cannot self-diagnose: the app says
+		// connected, but nothing loads, and nothing in the UI explains why.
+		// The single most common cause on this app is a network that blocks
+		// one core's handshake but not the other's — so point straight at
+		// the setting that fixes it rather than a generic "check connection".
+		other := "Xray"
+		if resolvedEngine == subscription.EngineXray {
+			other = "sing-box"
+		}
+		tunnelWarning = fmt.Sprintf(
+			"Похоже, туннель не заработал через %s. Если сайты не открываются, "+
+				"попробуйте переключить режим ядра на «%s» или «Авто» в настройках.",
+			engineRussianName(resolvedEngine), other)
 	}
 
 	m.mu.Lock()
 	m.state = StateConnected
 	m.engine = engine
 	m.connectedAt = time.Now()
+	m.lastWarning = tunnelWarning
 	m.session++
 	session := m.session
 	m.mu.Unlock()
 
-	go m.watchCores(session, config.NeedsXray(selected) || config.NeedsWarp(selected), opts)
+	go m.watchCores(session, usesXray || resolvedEngine == subscription.EngineWarp, opts)
 
 	m.store.UpdateSettings(func(s *storage.Settings) {
 		s.LastServerID = serverID
@@ -362,6 +388,7 @@ func (m *Manager) failConnect(err error) error {
 	m.current = nil
 	m.engine = ""
 	m.lastError = err.Error()
+	m.lastWarning = ""
 	m.connectedAt = time.Time{}
 	m.mu.Unlock()
 
@@ -390,6 +417,7 @@ func (m *Manager) Disconnect() error {
 	m.state = StateDisconnected
 	m.current = nil
 	m.engine = ""
+	m.lastWarning = ""
 	m.connectedAt = time.Time{}
 	m.mu.Unlock()
 
@@ -669,6 +697,33 @@ func waitForPort(port int, timeout time.Duration) error {
 // GetHWID returns the device HWID info for display in UI
 func (m *Manager) GetHWID() HWIDInfo { return GetHWIDInfo() }
 
+// resolveHost returns a node's IP addresses, or nothing if it is already an
+// IP or cannot be resolved. Failure is not fatal: the route rules that use
+// this are a safety net, and the cores do their own resolution regardless.
+func resolveHost(host string) []string {
+	if host == "" || net.ParseIP(host) != nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		log.Printf("[connect] could not pre-resolve %s: %v", host, err)
+		return nil
+	}
+	return addrs
+}
+
+// engineRussianName is used only in user-facing hint text.
+func engineRussianName(engine string) string {
+	if engine == subscription.EngineXray {
+		return "Xray"
+	}
+	return "sing-box"
+}
+
 // tunnelReadyTimeout bounds how long a connect waits for proof that traffic
 // flows. Past it we report connected anyway: the probe host may be
 // unreachable while the rest of the internet works fine.
@@ -714,15 +769,14 @@ func waitForTunnelReady(timeout time.Duration) error {
 	return lastErr
 }
 
-func setNetworkCategoryPrivate() {
-	cmd := `Set-NetConnectionProfile -InterfaceAlias 'RustleBoost' -NetworkCategory Private`
-	out, err := hiddenCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", cmd).CombinedOutput()
-	if err != nil {
-		log.Printf("[nla] Set-NetConnectionProfile failed: %v — %s", err, out)
-	} else {
-		log.Println("[nla] Network category set to Private")
-	}
-}
+// The adapter's network category used to be forced to Private here, by
+// running Set-NetConnectionProfile through PowerShell, so Windows would show
+// the connection as trusted. It only ever affected which firewall profile the
+// adapter fell under — cosmetic — while launching powershell.exe from a
+// hidden, unsigned process is among the strongest signals a behavioural
+// scanner looks for. With FakeIP answering the connectivity check's hostname
+// and the probe travelling through the tunnel, Windows works the status out
+// on its own.
 
 // preferredTransportHost — узел, на котором WARP проверен через WDTT.
 const preferredTransportHost = "151.243.208.197"

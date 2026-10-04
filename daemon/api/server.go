@@ -195,6 +195,9 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			if incoming.RouteMode != "" {
 				s.RouteMode = incoming.RouteMode
 			}
+			if incoming.RouterMode != "" {
+				s.RouterMode = incoming.RouterMode
+			}
 		})
 
 		jsonResponse(w, s.store.GetSettings())
