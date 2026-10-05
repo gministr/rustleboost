@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"log"
 	"net"
 	"net/http"
@@ -45,12 +46,15 @@ type Status struct {
 }
 
 type Manager struct {
-	mu          sync.RWMutex
-	dataDir     string
-	store       *storage.Store
-	singbox     *SingBoxRunner
-	xray        *XrayRunner
-	warp        WarpRunner
+	mu            sync.RWMutex
+	dataDir       string
+	store         *storage.Store
+	singbox       *SingBoxRunner
+	xray          *XrayRunner
+	warp          WarpRunner
+	wdtt          WdttRunner
+	device        *DeviceClient
+	deviceSession string
 	// catalog — серверы WDTT из каталога RustleBoost: транспорт для WARP.
 	catalog     []subscription.Server
 	prober      *LatencyProber
@@ -77,11 +81,13 @@ func NewManager(dataDir string, store *storage.Store) *Manager {
 	}
 
 	m.loadCache()
+	m.device = NewDeviceClient(dataDir)
 
 	settings := store.GetSettings()
 	if settings.AutoUpdate && settings.SubscriptionURL != "" {
 		m.startAutoUpdate()
 	}
+	go m.runDeviceLoop()
 
 	return m
 }
@@ -221,7 +227,15 @@ func (m *Manager) Connect(serverID string) error {
 	usesXray := resolvedEngine == subscription.EngineXray
 
 	engine := "sing-box"
-	if resolvedEngine == subscription.EngineWarp {
+	if resolvedEngine == subscription.EngineWdtt {
+		engine = "sing-box + wdtt"
+		if err := m.wdtt.Start(m.dataDir, selected, config.XraySocksPort, GetHWIDInfo().HWID, false); err != nil {
+			return m.failConnect(fmt.Errorf("wdtt: %w", err))
+		}
+		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
+			return m.failConnect(fmt.Errorf("wdtt: порт %d не открылся: %w", config.XraySocksPort, err))
+		}
+	} else if resolvedEngine == subscription.EngineWarp {
 		engine = "sing-box + warp"
 		transport := m.transportServer()
 		if transport == nil {
@@ -300,7 +314,7 @@ func (m *Manager) Connect(serverID string) error {
 	session := m.session
 	m.mu.Unlock()
 
-	go m.watchCores(session, usesXray || resolvedEngine == subscription.EngineWarp, opts)
+	go m.watchCores(session, usesXray || resolvedEngine == subscription.EngineWarp || resolvedEngine == subscription.EngineWdtt, opts)
 
 	m.store.UpdateSettings(func(s *storage.Settings) {
 		s.LastServerID = serverID
@@ -457,7 +471,7 @@ func (m *Manager) UpdateSubscription(subURL string) error {
 		return translateSubscriptionError(err)
 	}
 
-	// Каталог нужен только для транспорта WARP: неудача не должна ломать
+	// Каталог — вкладка RustleBoost и транспорт WARP: неудача не должна ломать
 	// подписку, поэтому старый каталог остаётся на месте.
 	if catalog, err := subscription.FetchCatalog(ctx, subURL, subscription.HWIDHeaders{
 		HWID: hwid.HWID, OS: hwid.OS, OSVer: hwid.OSVer, Model: hwid.Model,
@@ -468,7 +482,14 @@ func (m *Manager) UpdateSubscription(subURL string) error {
 		m.catalog = catalog
 		m.mu.Unlock()
 	}
-	if m.transportServer() != nil {
+	for i := range result.Servers {
+		result.Servers[i].Group = subscription.GroupRegular
+	}
+	m.mu.RLock()
+	catalog := append([]subscription.Server(nil), m.catalog...)
+	m.mu.RUnlock()
+	result.Servers = append(result.Servers, catalog...)
+	if len(catalog) > 0 {
 		result.Servers = append(result.Servers, subscription.WarpServer())
 	}
 
@@ -627,7 +648,7 @@ func (m *Manager) PingServer(serverID string) (int, error) {
 	if target == nil {
 		return -1, fmt.Errorf("server not found")
 	}
-	if target.Engine == subscription.EngineWarp {
+	if !measurable(*target) {
 		return -1, nil
 	}
 
@@ -645,7 +666,7 @@ func (m *Manager) PingAll() {
 	m.mu.RLock()
 	servers := make([]subscription.Server, 0, len(m.servers))
 	for _, s := range m.servers {
-		if s.Engine != subscription.EngineWarp {
+		if measurable(s) {
 			servers = append(servers, s)
 		}
 	}
@@ -800,11 +821,62 @@ func (m *Manager) transportServer() *subscription.Server {
 
 // chainRunning — поднято ли ядро, которое проксирует трафик в sing-box.
 func (m *Manager) chainRunning() bool {
-	return m.xray.IsRunning() || m.warp.IsRunning()
+	return m.xray.IsRunning() || m.warp.IsRunning() || m.wdtt.IsRunning()
 }
 
 // stopChains снимает WARP и Xray: сторож и отключение работают с обоими.
 func (m *Manager) stopChains() error {
 	m.warp.Stop()
+	m.wdtt.Stop()
 	return m.xray.Stop()
+}
+
+// measurable — можно ли замерить задержку: WDTT и WARP устроены так, что
+// адрес в списке не отвечает на проверку, поэтому их не меряем.
+func measurable(s subscription.Server) bool {
+	return s.Engine != subscription.EngineWarp && s.Engine != subscription.EngineWdtt
+}
+
+// runDeviceLoop регистрирует устройство и шлёт сердцебиение раз в минуту.
+// Сбои не фатальны: панель просто увидит устройство позже.
+func (m *Manager) runDeviceLoop() {
+	ticker := time.NewTicker(heartbeatEvery)
+	defer ticker.Stop()
+	for {
+		m.deviceTick()
+		<-ticker.C
+	}
+}
+
+func (m *Manager) deviceTick() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	settings := m.store.GetSettings()
+	var keys []string
+	if key := subscription.ShortKey(settings.SubscriptionURL); key != "" {
+		keys = append(keys, key)
+	}
+	if !m.device.Registered() {
+		if err := m.device.Register(ctx, keys); err != nil {
+			log.Printf("[device] регистрация: %v", err)
+			return
+		}
+	}
+
+	status := m.GetStatus()
+	connected := status.State == StateConnected
+	server := ""
+	if status.Server != nil {
+		server = status.Server.Name
+	}
+	if m.deviceSession == "" || !connected {
+		m.deviceSession = uuid.NewString()
+	}
+	if err := m.device.Heartbeat(ctx, m.deviceSession, connected, server, status.Stats.Upload, status.Stats.Download); err != nil {
+		log.Printf("[device] heartbeat: %v", err)
+	}
+	if err := m.device.UpdateSubscriptions(ctx, keys); err != nil {
+		log.Printf("[device] обновление ключей: %v", err)
+	}
 }

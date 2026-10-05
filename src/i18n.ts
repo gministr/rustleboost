@@ -19,6 +19,11 @@ const ru = {
 
   // Main screen
   servers: "Серверы",
+  tabRegular: "Обычные",
+  tabRustleBoost: "RustleBoost",
+  tabWarp: "WARP",
+  warpHint: "Нужен, когда сервисы по типу Gemini и Adobe ругаются на ваше местоположение",
+  errServiceDown: "Служба RustleBoost не запущена — перезапустите приложение",
   noServers: "Нет серверов",
   refreshSubscription: "Обновить подписку",
   checkPing: "Проверить пинг",
@@ -128,6 +133,11 @@ const en: Dictionary = {
   stateDisconnecting: "Disconnecting...",
 
   servers: "Servers",
+  tabRegular: "Regular",
+  tabRustleBoost: "RustleBoost",
+  tabWarp: "WARP",
+  warpHint: "Needed when services like Gemini and Adobe object to your location",
+  errServiceDown: "The RustleBoost service is not running — restart the app",
   noServers: "No servers",
   refreshSubscription: "Refresh subscription",
   checkPing: "Test latency",

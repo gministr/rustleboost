@@ -4,6 +4,7 @@ import { ArrowRight, RefreshCw, AlertCircle } from "lucide-react";
 import { useVPNStore } from "../store/vpnStore";
 import logoUrl from "../assets/logo.png";
 import { useT } from "../i18n";
+import { errorText } from "../api/daemon";
 
 export default function OnboardingPage() {
   const { updateSubscription } = useVPNStore();
@@ -20,7 +21,7 @@ export default function OnboardingPage() {
     try {
       await updateSubscription(trimmed);
     } catch (e: any) {
-      setError(e?.message ?? t("errLoadSubscription"));
+      setError(errorText(e, t("errLoadSubscription")));
     } finally {
       setLoading(false);
     }

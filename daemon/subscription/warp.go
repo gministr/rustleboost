@@ -29,6 +29,13 @@ const (
 	CatalogAppKey = "01OPe3R6UJ6FsMEFCjGNJwjU3EOkta-l"
 )
 
+// Группы серверов — вкладки интерфейса.
+const (
+	GroupRegular     = "regular"
+	GroupRustleBoost = "rustleboost"
+	GroupWarp        = "warp"
+)
+
 // WarpServer — синтетический пункт WARP: адрес и ключи выдаёт Cloudflare при
 // первом подключении, поэтому реальный адрес здесь только для подписи.
 func WarpServer() Server {
@@ -39,6 +46,7 @@ func WarpServer() Server {
 		Address:  "engage.cloudflareclient.com",
 		Port:     2408,
 		Engine:   EngineWarp,
+		Group:    GroupWarp,
 	}
 }
 
@@ -128,6 +136,7 @@ func FetchCatalog(ctx context.Context, subURL string, hwid HWIDHeaders) ([]Serve
 	var wdtt []Server
 	for _, s := range servers {
 		if s.Engine == EngineWdtt {
+			s.Group = GroupRustleBoost
 			wdtt = append(wdtt, s)
 		}
 	}

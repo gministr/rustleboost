@@ -371,9 +371,12 @@ func retagXrayOutbound(raw json.RawMessage, tag string) (json.RawMessage, error)
 // would defeat the point of forcing sing-box in the first place — the user
 // asked specifically to rule it out.
 func ResolveEngine(server subscription.Server, routerMode string) string {
-	// WARP — собственный движок демона: режим маршрутизации его не меняет.
+	// WARP и WDTT — собственные ядра демона: режим маршрутизации их не меняет.
 	if server.Engine == subscription.EngineWarp {
 		return subscription.EngineWarp
+	}
+	if server.Engine == subscription.EngineWdtt {
+		return subscription.EngineWdtt
 	}
 	singBoxOnly := server.Engine == subscription.EngineSingBox && len(server.Outbound) == 0
 
@@ -405,6 +408,17 @@ func NeedsXray(server subscription.Server) bool {
 // видит его на том же SOCKS-порту, что и Xray.
 func NeedsWarp(server subscription.Server) bool {
 	return ResolveEngine(server, RouterAuto) == subscription.EngineWarp
+}
+
+// NeedsWdtt — сервер RustleBoost (WDTT): ядро WDTT держит SOCKS, sing-box
+// отправляет трафик туда же, куда и к Xray.
+func NeedsWdtt(server subscription.Server) bool {
+	return server.Engine == subscription.EngineWdtt
+}
+
+// needsSocksCore — пункты, которые выходят через SOCKS-порт, поднятый ядром демона.
+func needsSocksCore(server subscription.Server) bool {
+	return NeedsWarp(server) || NeedsWdtt(server)
 }
 
 // Generate builds the sing-box side.
@@ -599,8 +613,8 @@ func buildRoute(server subscription.Server, opts Options) RouteConfig {
 		// Everything the cores themselves send must bypass the tunnel,
 		// otherwise the proxy leg is routed back into TUN and deadlocks.
 		processes := []string{"xray.exe", "sing-box.exe"}
-		if NeedsWarp(server) {
-			// Движок WARP живёт внутри демона: его сокеты (VK-релеи, узел WDTT,
+		if needsSocksCore(server) {
+			// Ядра WDTT и WARP живут внутри демона: его сокеты (VK-релеи, узел,
 			// регистрация) тоже должны миновать TUN, иначе транспорт уйдёт сам в себя.
 			processes = append(processes, "daemon.exe")
 		}
@@ -643,8 +657,8 @@ func buildRoute(server subscription.Server, opts Options) RouteConfig {
 	}
 
 	return RouteConfig{
-		Rules:                 rules,
-		Final:                 "proxy",
+		Rules: rules,
+		Final: "proxy",
 		// Outbounds resolve through the real resolver. Handing them a FakeIP
 		// address would mean dialling a placeholder that routes nowhere.
 		DefaultDomainResolver: "local-dns",
@@ -677,7 +691,7 @@ func buildInbounds(opts Options) []interface{} {
 			InterfaceName: "RustleBoost",
 			Address:       []string{"172.19.0.1/30"},
 			MTU:           1500,
-			AutoRoute: true,
+			AutoRoute:     true,
 			// Off deliberately. It was switched on to make Windows report the
 			// adapter as online, by forcing the connectivity probe through
 			// the tunnel. On Windows it installs filters that drop traffic
@@ -701,7 +715,7 @@ func buildInbounds(opts Options) []interface{} {
 func buildProxyOutbound(server subscription.Server, routerMode string) (interface{}, error) {
 	engine := ResolveEngine(server, routerMode)
 
-	if engine == subscription.EngineWarp {
+	if engine == subscription.EngineWarp || engine == subscription.EngineWdtt {
 		return SocksOutbound{
 			Type:       "socks",
 			Tag:        "proxy",

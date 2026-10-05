@@ -61,6 +61,9 @@ type Server struct {
 	RawURI    string            `json:"raw_uri"`
 	Engine    string            `json:"engine"`
 	Params    map[string]string `json:"params,omitempty"`
+	// Group — вкладка в интерфейсе: "regular" (подписка Remnawave),
+	// "rustleboost" (каталог RustleBoost), "warp".
+	Group string `json:"group,omitempty"`
 
 	// Outbound is a ready-to-use Xray outbound object (engine "xray").
 	// It is serialised so the on-disk cache can reconnect after a restart

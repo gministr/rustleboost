@@ -4,7 +4,7 @@ import { RefreshCw, CheckCircle2, AlertCircle, Copy, Cpu } from "lucide-react";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useVPNStore } from "../store/vpnStore";
-import { Settings, api, HWIDInfo } from "../api/daemon";
+import { Settings, api, HWIDInfo, errorText } from "../api/daemon";
 import { useT, formatHours, Language } from "../i18n";
 
 type ReqStatus = "idle" | "loading" | "success" | "error";
@@ -126,7 +126,7 @@ export default function SettingsPage() {
       setSubStatus("success"); setSubMsg(t("saved"));
       setTimeout(() => setSubStatus("idle"), 3000);
     } catch (e: any) {
-      setSubStatus("error"); setSubMsg(e?.message ?? t("errSubscription"));
+      setSubStatus("error"); setSubMsg(errorText(e, t("errSubscription")));
       setTimeout(() => setSubStatus("idle"), 4000);
     }
   };

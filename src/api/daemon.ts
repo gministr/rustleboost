@@ -1,5 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/**
+ * Текст ошибки из Tauri. Команды возвращают строку, а не Error, поэтому
+ * `e.message` пуст и интерфейс показывал запасную фразу вместо причины.
+ */
+export function errorText(e: unknown, fallback: string): string {
+  if (typeof e === "string" && e.trim()) return e;
+  if (e instanceof Error && e.message) return e.message;
+  if (e && typeof e === "object" && "message" in e && typeof (e as any).message === "string") {
+    return (e as any).message || fallback;
+  }
+  return fallback;
+}
+
 export interface Server {
   id: string;
   name: string;
@@ -16,6 +29,8 @@ export interface Server {
   port: number;
   latency: number;
   raw_uri: string;
+  /** regular | rustleboost | warp — вкладка в интерфейсе */
+  group?: string;
 }
 
 /** Traffic and validity, as reported by the subscription's own headers. */

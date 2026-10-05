@@ -21,7 +21,15 @@ fn client() -> reqwest::Client {
 /// body. Decoding the body without checking the status would turn a failed
 /// connect into a successful-looking response and leave the UI silent.
 async fn send(req: reqwest::RequestBuilder) -> Result<serde_json::Value, String> {
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(|e| {
+        // Демон не отвечает: чаще всего его не запустили или антивирус снял.
+        // Говорим об этом прямо, а не выводим текст сетевой ошибки.
+        if e.is_connect() {
+            "служба RustleBoost не запущена — перезапустите приложение".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
 

@@ -72,6 +72,20 @@ export default function MainPage() {
     else connect(serverId);
   };
 
+  // Три вкладки, как в мобильных приложениях: обычные серверы подписки,
+  // серверы RustleBoost из каталога и WARP. Группа приходит с демона.
+  const groupOf = (srv: { group?: string }) => srv.group || "regular";
+  const groupCounts = {
+    regular: servers.filter(x => groupOf(x) === "regular").length,
+    rustleboost: servers.filter(x => groupOf(x) === "rustleboost").length,
+    warp: servers.filter(x => groupOf(x) === "warp").length,
+  };
+  const [tab, setTab] = useState<"regular" | "rustleboost" | "warp" | null>(null);
+  const activeTab: "regular" | "rustleboost" | "warp" =
+    tab ?? (server?.group as "regular" | "rustleboost" | "warp" | undefined)
+    ?? (groupCounts.regular > 0 ? "regular" : groupCounts.rustleboost > 0 ? "rustleboost" : "warp");
+  const shownServers = servers.filter(x => groupOf(x) === activeTab);
+
   return (
     <motion.div
       className="flex flex-col h-full overflow-hidden"
@@ -174,8 +188,8 @@ export default function MainPage() {
             color: "var(--c-sec-label)",
           }}>
             {t("servers")}
-            {servers.length > 0 && (
-              <span style={{ marginLeft: 6, fontWeight: 400 }}>{servers.length}</span>
+            {shownServers.length > 0 && (
+              <span style={{ marginLeft: 6, fontWeight: 400 }}>{shownServers.length}</span>
             )}
           </p>
           <div style={{ display: "flex", gap: 6 }}>
@@ -188,8 +202,40 @@ export default function MainPage() {
           </div>
         </div>
 
+        {/* Вкладки групп */}
+        {servers.length > 0 && (
+          <div style={{ display: "flex", gap: 4, marginBottom: 10, padding: 3, borderRadius: 10, background: "var(--c-icon-btn-bg)" }}>
+            {([
+              ["regular", t("tabRegular")],
+              ["rustleboost", t("tabRustleBoost")],
+              ["warp", t("tabWarp")],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                style={{
+                  flex: 1, height: 28, border: "none", borderRadius: 8, cursor: "pointer",
+                  fontSize: 12, fontWeight: activeTab === key ? 600 : 400,
+                  background: activeTab === key ? "var(--c-surface-hover)" : "transparent",
+                  color: activeTab === key ? "var(--c-text)" : "var(--c-text-dim)",
+                }}
+              >
+                {label}
+                {groupCounts[key] > 0 && key !== "warp" && (
+                  <span style={{ marginLeft: 4, opacity: 0.6 }}>{groupCounts[key]}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+        {activeTab === "warp" && servers.length > 0 && (
+          <p style={{ fontSize: 11, color: "var(--c-text-dim)", margin: "0 2px 10px", lineHeight: 1.4 }}>
+            {t("warpHint")}
+          </p>
+        )}
+
         {/* List */}
-        {servers.length === 0 ? (
+        {shownServers.length === 0 ? (
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingTop: 48, gap: 10 }}>
             <Globe size={36} style={{ color: "var(--c-text-dimmer)", strokeWidth: 1 }} />
             <p style={{ fontSize: 13, color: "var(--c-text-dim)" }}>{t("noServers")}</p>
@@ -199,7 +245,7 @@ export default function MainPage() {
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {servers.map(srv => (
+            {shownServers.map(srv => (
               <ServerCard
                 key={srv.id}
                 server={srv}
