@@ -32,6 +32,13 @@ var WinDivertDLL []byte
 //go:embed assets/WinDivert64.sys
 var WinDivertSYS []byte
 
+// CygwinDLL is winws.exe's own runtime dependency — it is built against
+// Cygwin, and without this next to the exe Windows refuses to start the
+// process at all, with nothing printed anywhere to say why.
+//
+//go:embed assets/cygwin1.dll
+var CygwinDLL []byte
+
 // TLSPattern is a real, captured TLS ClientHello for a well-known host. It is
 // never sent anywhere — winws uses its bytes only as filler for the
 // "sequence overlap" trick (--dpi-desync-split-seqovl-pattern), which needs

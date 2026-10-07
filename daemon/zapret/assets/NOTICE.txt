@@ -7,6 +7,11 @@ These binaries are vendored unmodified from the official upstream project:
   winws.exe              sha256 a14bff1df6234ea555d2e0c61b589f0707c0b12d6c9b7eeccda76012154996e8
   WinDivert.dll          sha256 c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2
   WinDivert64.sys        sha256 8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2
+  cygwin1.dll            sha256 103104a52e5293ce418944725df19e2bf81ad9269b9a120d71d39028e821499b
+
+  cygwin1.dll is winws.exe's own runtime dependency (it is built against
+  Cygwin) — without it next to the exe, Windows fails to start the process
+  at all. Easy to miss since nothing prints a useful error for it.
 
   tls_clienthello_www_google_com.bin, quic_initial_www_google_com.bin and
   discord-ip-discovery-with-port.bin come from the same release's files/fake/

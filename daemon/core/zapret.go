@@ -110,6 +110,9 @@ func (r *ZapretRunner) writeAssets() (zapretPaths, error) {
 	if _, err := write("WinDivert64.sys", zapret.WinDivertSYS); err != nil {
 		return zapretPaths{}, err
 	}
+	if _, err := write("cygwin1.dll", zapret.CygwinDLL); err != nil {
+		return zapretPaths{}, err
+	}
 	tlsPath, err := write("zapret-tls-pattern.bin", zapret.TLSPattern)
 	if err != nil {
 		return zapretPaths{}, err

@@ -15,8 +15,8 @@
     "InternalName":     "daemon",
     "OriginalFilename": "daemon.exe",
     "LegalCopyright":   "Copyright (c) 2026 RustleBoost. MIT License.",
-    "FileVersion":      "1.6.0.0",
-    "ProductVersion":   "1.6.0.0",
+    "FileVersion":      "1.6.1.0",
+    "ProductVersion":   "1.6.1.0",
     "Comments":         "Manages the sing-box and Xray cores for the RustleBoost VPN client. Source: https://github.com/gministr/rustleboost"
   },
   "VarFileInfo": {
