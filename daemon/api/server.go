@@ -45,6 +45,24 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/settings", s.handleSettings)
 	s.mux.HandleFunc("/api/hwid", s.handleHWID)
 	s.mux.HandleFunc("/api/game-profiles", s.handleGameProfiles)
+	s.mux.HandleFunc("/api/zapret-log", s.handleZapretLog)
+}
+
+// handleZapretLog serves winws's own log as plain text — readable straight
+// in a browser (http://localhost:<port>/api/zapret-log) without touching the
+// Tauri frontend, specifically so this is useful before the next full
+// release ships whatever the log turns out to explain.
+func (s *Server) handleZapretLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	tail := s.manager.ZapretLogTail(200)
+	if tail == "" {
+		tail = "(лог пуст — winws ещё не запускался)"
+	}
+	w.Write([]byte(tail))
 }
 
 func (s *Server) handleGameProfiles(w http.ResponseWriter, r *http.Request) {

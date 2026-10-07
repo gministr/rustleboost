@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,6 +72,12 @@ func (r *ZapretRunner) Start() error {
 		"--dpi-desync-fake-discord=" + paths.discordFake,
 		"--dpi-desync-fake-stun=" + paths.discordFake,
 	}
+
+	// Logged in full: a filter that is merely wrong (bad port range, a typo
+	// in a path) doesn't crash winws, it just runs and touches nothing —
+	// "exited immediately" catches a crash, but not this. The exact command
+	// line is the fastest way to tell the two apart from winws's own log.
+	log.Printf("[zapret] starting: winws %s", strings.Join(args, " "))
 
 	return r.proc.startArgs(args...)
 }

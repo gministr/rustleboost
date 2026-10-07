@@ -747,6 +747,13 @@ func waitForPort(port int, timeout time.Duration) error {
 // GetHWID returns the device HWID info for display in UI
 func (m *Manager) GetHWID() HWIDInfo { return GetHWIDInfo() }
 
+// ZapretLogTail returns winws's own log — the only place that says why the
+// DPI-desync engine looks "running" but isn't actually touching traffic
+// (wrong filter syntax, WinDivert refusing to attach, etc). Surfaced over
+// HTTP so it can be read without rebuilding the Tauri frontend: open
+// http://localhost:<port>/api/zapret-log in a browser while the app runs.
+func (m *Manager) ZapretLogTail(n int) string { return m.zapret.LogTail(n) }
+
 // resolveHost returns a node's IP addresses, or nothing if it is already an
 // IP or cannot be resolved. Failure is not fatal: the route rules that use
 // this are a safety net, and the cores do their own resolution regardless.
