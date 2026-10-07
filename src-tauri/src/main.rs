@@ -39,6 +39,7 @@ fn main() {
             commands::set_autostart,
             commands::get_daemon_port,
             commands::get_hwid,
+            commands::get_game_profiles,
         ])
         .setup(|app| {
             tauri::async_runtime::spawn(async {

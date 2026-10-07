@@ -24,7 +24,7 @@ import (
 const (
 	deviceAPIBase    = "https://auth.lindavpn.com"
 	devicePlatform   = "windows"
-	deviceAppVersion = "1.5.0"
+	deviceAppVersion = "1.6.0"
 	heartbeatEvery   = time.Minute
 )
 

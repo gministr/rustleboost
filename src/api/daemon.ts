@@ -69,6 +69,24 @@ export interface Status {
   error?: string;
   /** set when "connected" could not be verified — see UpdateBanner-style hint in MainPage */
   warning?: string;
+  /** whether the zapret (Discord/YouTube direct) engine is actually running */
+  zapret_active: boolean;
+  /** set when hybrid mode wanted zapret on but it failed to start */
+  zapret_warning?: string;
+}
+
+/** One hybrid-mode routing exception beyond the built-in games/zapret lists. */
+export interface CustomRule {
+  type: "domain" | "domain_suffix" | "ip_cidr" | "process_name";
+  value: string;
+}
+
+/** A built-in game's traffic signals, as served by GET /api/game-profiles. */
+export interface GameProfile {
+  id: string;
+  name: string;
+  process_names: string[];
+  cidrs: string[];
 }
 
 export interface Settings {
@@ -82,7 +100,7 @@ export interface Settings {
   allow_lan: boolean;
   language: "ru" | "en";
   tun_mode: boolean;
-  route_mode: "all" | "ru" | "cn";
+  route_mode: "all" | "ru" | "cn" | "hybrid";
   /**
    * Which core carries proxy traffic. Which implementation's handshake gets
    * through a given network isn't predictable from the app's side — it can
@@ -90,6 +108,13 @@ export interface Settings {
    * choice, not something decided automatically.
    */
   router_mode: "auto" | "singbox" | "xray";
+
+  /** Hybrid mode: Discord/YouTube via the zapret DPI-desync engine, direct. */
+  hybrid_zapret: boolean;
+  /** Hybrid mode: enabled GameProfile ids, routed direct. */
+  hybrid_games: string[];
+  /** Hybrid mode: the user's own additions. */
+  hybrid_custom_rules: CustomRule[];
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -116,6 +141,7 @@ export const api = {
   getSettings: () => call<Settings>("get_settings"),
   saveSettings: (settings: Partial<Settings>) =>
     call<Settings>("save_settings", { settings }),
+  getGameProfiles: () => call<GameProfile[]>("get_game_profiles"),
   pingServer: (serverId: string) =>
     call<{ latency: number }>("ping_server", { serverId }),
   pingAll: () => call<{ status: string }>("ping_all"),

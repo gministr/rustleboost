@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/vpnclient/daemon/config"
 	"github.com/vpnclient/daemon/core"
 	"github.com/vpnclient/daemon/storage"
 )
@@ -43,6 +44,15 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/ping-all", s.handlePingAll)
 	s.mux.HandleFunc("/api/settings", s.handleSettings)
 	s.mux.HandleFunc("/api/hwid", s.handleHWID)
+	s.mux.HandleFunc("/api/game-profiles", s.handleGameProfiles)
+}
+
+func (s *Server) handleGameProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jsonResponse(w, config.GameProfiles)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -197,6 +207,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			if incoming.RouterMode != "" {
 				s.RouterMode = incoming.RouterMode
+			}
+			s.HybridZapret = incoming.HybridZapret
+			if incoming.HybridGames != nil {
+				s.HybridGames = incoming.HybridGames
+			}
+			if incoming.HybridCustomRules != nil {
+				s.HybridCustomRules = incoming.HybridCustomRules
 			}
 		})
 

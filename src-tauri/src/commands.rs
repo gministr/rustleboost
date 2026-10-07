@@ -108,6 +108,11 @@ pub async fn get_hwid() -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
+pub async fn get_game_profiles() -> Result<serde_json::Value, String> {
+    send(client().get(daemon_url("/api/game-profiles"))).await
+}
+
+#[tauri::command]
 pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     let autostart = app.autolaunch();
     if enabled {

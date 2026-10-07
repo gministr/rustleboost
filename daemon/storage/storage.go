@@ -21,12 +21,36 @@ type Settings struct {
 	AllowLAN       bool   `json:"allow_lan"`
 	Language       string `json:"language"`
 	TUNMode        bool   `json:"tun_mode"`
-	RouteMode      string `json:"route_mode"` // "all" | "ru" | "cn"
+	RouteMode      string `json:"route_mode"` // "all" | "ru" | "cn" | "hybrid"
 	// RouterMode picks which core carries proxy traffic. Which one gets
 	// through varies by network — a censor can fingerprint and block one
 	// implementation's handshake while letting the other through — so this
 	// is a user choice, not something the app should decide on its own.
 	RouterMode string `json:"router_mode"` // "auto" | "singbox" | "xray"
+
+	// The fields below configure RouteMode == "hybrid": Discord/YouTube via
+	// zapret, chosen games direct, everything else via the normally selected
+	// server (WARP by default once the user turns hybrid mode on, same as
+	// any other server pick, since the two are independent settings).
+
+	// HybridZapret enables the DPI-desync engine for Discord/YouTube. Off by
+	// default even within hybrid mode: it is a kernel-level packet filter
+	// (WinDivert) some antivirus software flags on sight, so it should never
+	// turn on as a side effect of an unrelated setting.
+	HybridZapret bool `json:"hybrid_zapret"`
+	// HybridGames are enabled GameProfile IDs (see config.GameProfiles) —
+	// their traffic goes direct instead of through the tunnel.
+	HybridGames []string `json:"hybrid_games"`
+	// HybridCustomRules are the user's own additions beyond the built-in
+	// games and the RU/zapret lists.
+	HybridCustomRules []CustomRule `json:"hybrid_custom_rules"`
+}
+
+// CustomRule is one user-added hybrid-mode routing exception.
+type CustomRule struct {
+	// Type is "domain" | "domain_suffix" | "ip_cidr" | "process_name".
+	Type  string `json:"type"`
+	Value string `json:"value"`
 }
 
 type Store struct {

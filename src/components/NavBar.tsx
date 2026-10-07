@@ -1,15 +1,17 @@
 import { NavLink } from "react-router-dom";
-import { Shield, Settings } from "lucide-react";
+import { Shield, Settings, Shuffle } from "lucide-react";
 import { useVPNStore } from "../store/vpnStore";
 import { useT } from "../i18n";
 
 const tabs = [
   { to: "/", icon: Shield, labelKey: "navHome" as const },
+  { to: "/hybrid", icon: Shuffle, labelKey: "navHybrid" as const },
   { to: "/settings", icon: Settings, labelKey: "navSettings" as const },
 ];
 
 export default function NavBar() {
   const state = useVPNStore(s => s.status.state);
+  const hybridActive = useVPNStore(s => s.settings.route_mode === "hybrid");
   const t = useT();
 
   return (
@@ -30,6 +32,9 @@ export default function NavBar() {
                   <Icon size={21} strokeWidth={isActive ? 2.5 : 1.5} />
                   {to === "/" && state === "connected" && (
                     <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-green-400 rounded-full border border-surface-900" />
+                  )}
+                  {to === "/hybrid" && hybridActive && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-blue-400 rounded-full border border-surface-900" />
                   )}
                 </div>
                 <span className="text-[10px] font-medium">{t(labelKey)}</span>

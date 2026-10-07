@@ -99,6 +99,57 @@ func (p *procRunner) start(cfgJSON []byte, cfgName string, args ...string) error
 	return nil
 }
 
+// startArgs launches the binary directly with the given arguments, for a
+// process that takes no "-c config run" shape — winws (zapret) is configured
+// entirely through command-line flags, with no config file to write.
+func (p *procRunner) startArgs(args ...string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.running.Load() {
+		p.stopLocked()
+	}
+
+	binary := p.findBinary()
+	if binary == "" {
+		return fmt.Errorf("%s binary not found", p.binary)
+	}
+
+	logFile, _ := os.OpenFile(p.logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+
+	p.cmd = hiddenCommand(binary, args...)
+	p.cmd.Stdout = logFile
+	p.cmd.Stderr = logFile
+
+	if err := p.cmd.Start(); err != nil {
+		if logFile != nil {
+			logFile.Close()
+		}
+		return fmt.Errorf("start %s: %w", p.binary, err)
+	}
+
+	p.running.Store(true)
+	writePIDFile(p.dataDir, p.instance, p.cmd.Process.Pid)
+	log.Printf("[%s] started pid=%d", p.instance, p.cmd.Process.Pid)
+
+	cmd := p.cmd
+	go func() {
+		cmd.Wait()
+		p.running.Store(false)
+		log.Printf("[%s] exited", p.instance)
+	}()
+
+	time.Sleep(400 * time.Millisecond)
+	if logFile != nil {
+		logFile.Close()
+	}
+
+	if !p.running.Load() {
+		return fmt.Errorf("%s exited immediately:\n%s", p.binary, tailFile(p.logPath, 8))
+	}
+	return nil
+}
+
 func (p *procRunner) stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -153,6 +204,7 @@ func CleanupStaleCores(dataDir string) {
 		"sing-box":   "sing-box",
 		"xray":       "xray",
 		"xray-probe": "xray",
+		"winws":      "winws",
 	}
 
 	for instance, binary := range cores {

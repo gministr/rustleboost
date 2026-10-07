@@ -1,11 +1,12 @@
 import { create } from "zustand";
-import { api, Status, Server, Settings, SubscriptionInfo } from "../api/daemon";
+import { api, Status, Server, Settings, SubscriptionInfo, GameProfile } from "../api/daemon";
 import { translate, Language, TranslationKey } from "../i18n";
 
 interface VPNStore {
   status: Status;
   servers: Server[];
   settings: Settings;
+  gameProfiles: GameProfile[];
   info: SubscriptionInfo | null;
   daemonReady: boolean;
   loading: boolean;
@@ -16,6 +17,7 @@ interface VPNStore {
   fetchServers: () => Promise<void>;
   fetchSettings: () => Promise<void>;
   fetchSubscription: () => Promise<void>;
+  fetchGameProfiles: () => Promise<void>;
   connect: (serverId: string) => Promise<void>;
   disconnect: () => Promise<void>;
   updateSubscription: (url: string) => Promise<void>;
@@ -38,6 +40,7 @@ function errorText(e: unknown, language: Language, key: TranslationKey): string 
 const defaultStatus: Status = {
   state: "disconnected",
   stats: { upload: 0, download: 0, uptime: 0 },
+  zapret_active: false,
 };
 
 const defaultSettings: Settings = {
@@ -53,12 +56,16 @@ const defaultSettings: Settings = {
   tun_mode: true,
   route_mode: "ru",
   router_mode: "auto",
+  hybrid_zapret: false,
+  hybrid_games: [],
+  hybrid_custom_rules: [],
 };
 
 export const useVPNStore = create<VPNStore>((set, get) => ({
   status: defaultStatus,
   servers: [],
   settings: defaultSettings,
+  gameProfiles: [],
   info: null,
   daemonReady: false,
   loading: false,
@@ -177,6 +184,15 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       } catch {
         // daemon busy; try again on the next tick
       }
+    }
+  },
+
+  fetchGameProfiles: async () => {
+    try {
+      const gameProfiles = await api.getGameProfiles();
+      set({ gameProfiles: gameProfiles ?? [] });
+    } catch {
+      // daemon not ready yet
     }
   },
 

@@ -43,6 +43,11 @@ type Status struct {
 	// the tunnel actually carries traffic — a state the user cannot tell
 	// apart from a working connection without this hint.
 	Warning string `json:"warning,omitempty"`
+	// ZapretActive reflects whether the DPI-desync engine is actually
+	// running, in hybrid mode with that option on — separate from Warning
+	// because it is specific to the Discord/YouTube path, not the tunnel.
+	ZapretActive  bool   `json:"zapret_active"`
+	ZapretWarning string `json:"zapret_warning,omitempty"`
 }
 
 type Manager struct {
@@ -53,6 +58,7 @@ type Manager struct {
 	xray          *XrayRunner
 	warp          WarpRunner
 	wdtt          WdttRunner
+	zapret        *ZapretRunner
 	device        *DeviceClient
 	deviceSession string
 	// catalog — серверы WDTT из каталога RustleBoost: транспорт для WARP.
@@ -63,8 +69,9 @@ type Manager struct {
 	current     *subscription.Server
 	state       ConnectionState
 	engine      string
-	lastError   string
-	lastWarning string
+	lastError     string
+	lastWarning   string
+	zapretWarning string
 	session     uint64 // bumped per connect; identifies the live watchdog
 	connectedAt time.Time
 	subCancel   context.CancelFunc
@@ -77,6 +84,7 @@ func NewManager(dataDir string, store *storage.Store) *Manager {
 		state:   StateDisconnected,
 		singbox: NewSingBoxRunner(dataDir),
 		xray:    NewXrayRunner(dataDir),
+		zapret:  NewZapretRunner(dataDir),
 		prober:  NewLatencyProber(dataDir),
 	}
 
@@ -140,11 +148,13 @@ func (m *Manager) GetStatus() Status {
 	defer m.mu.RUnlock()
 
 	status := Status{
-		State:   m.state,
-		Server:  m.current,
-		Engine:  m.engine,
-		Error:   m.lastError,
-		Warning: m.lastWarning,
+		State:         m.state,
+		Server:        m.current,
+		Engine:        m.engine,
+		Error:         m.lastError,
+		Warning:       m.lastWarning,
+		ZapretActive:  m.zapret.IsRunning(),
+		ZapretWarning: m.zapretWarning,
 	}
 
 	if m.state == StateConnected && !m.connectedAt.IsZero() {
@@ -220,9 +230,28 @@ func (m *Manager) Connect(serverID string) error {
 		// Both read now, while the system resolver still works normally. Once
 		// the tunnel is up these names answer with placeholder addresses, and
 		// the adapter's own DNS entries would point back into the tunnel.
-		ServerIPs: resolveHost(selected.Address),
-		SystemDNS: SystemDNSServers(),
+		ServerIPs:         resolveHost(selected.Address),
+		SystemDNS:         SystemDNSServers(),
+		HybridGames:       settings.HybridGames,
+		HybridCustomRules: convertCustomRules(settings.HybridCustomRules),
 	}
+
+	zapretWarning := ""
+	if settings.RouteMode == "hybrid" && settings.HybridZapret {
+		if err := m.zapret.Start(); err != nil {
+			log.Printf("[connect] zapret did not start: %v", err)
+			zapretWarning = "Discord/YouTube напрямую не включились: " + err.Error() +
+				" — они пойдут через обычный туннель."
+		} else {
+			opts.ZapretActive = true
+		}
+	} else {
+		m.zapret.Stop()
+	}
+	m.mu.Lock()
+	m.zapretWarning = zapretWarning
+	m.mu.Unlock()
+
 	resolvedEngine := config.ResolveEngine(selected, opts.RouterMode)
 	usesXray := resolvedEngine == subscription.EngineXray
 
@@ -824,11 +853,23 @@ func (m *Manager) chainRunning() bool {
 	return m.xray.IsRunning() || m.warp.IsRunning() || m.wdtt.IsRunning()
 }
 
-// stopChains снимает WARP и Xray: сторож и отключение работают с обоими.
+// stopChains снимает WARP, WDTT, zapret и Xray: сторож и отключение работают со всеми.
 func (m *Manager) stopChains() error {
 	m.warp.Stop()
 	m.wdtt.Stop()
+	m.zapret.Stop()
 	return m.xray.Stop()
+}
+
+// convertCustomRules adapts the storage shape to config's — kept as two
+// identical-looking types rather than one shared package because storage
+// knows nothing about config and should not need to.
+func convertCustomRules(rules []storage.CustomRule) []config.CustomRule {
+	out := make([]config.CustomRule, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, config.CustomRule{Type: r.Type, Value: r.Value})
+	}
+	return out
 }
 
 // measurable — можно ли замерить задержку: WDTT и WARP устроены так, что

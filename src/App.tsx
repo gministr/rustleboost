@@ -5,13 +5,14 @@ import { useVPNStore } from "./store/vpnStore";
 import { useThemeStore } from "./store/themeStore";
 import MainPage from "./pages/MainPage";
 import SettingsPage from "./pages/SettingsPage";
+import HybridPage from "./pages/HybridPage";
 import OnboardingPage from "./pages/OnboardingPage";
 import TitleBar from "./components/TitleBar";
 import NavBar from "./components/NavBar";
 import UpdateBanner from "./components/UpdateBanner";
 
 export default function App() {
-  const { fetchStatus, fetchServers, fetchSettings, fetchSubscription, settings } = useVPNStore();
+  const { fetchStatus, fetchServers, fetchSettings, fetchSubscription, fetchGameProfiles, settings } = useVPNStore();
   const isDark = useThemeStore(s => s.isDark);
 
   useEffect(() => {
@@ -19,6 +20,7 @@ export default function App() {
     fetchServers();
     fetchStatus();
     fetchSubscription();
+    fetchGameProfiles();
 
     const status = setInterval(fetchStatus, 2000);
     // Traffic and expiry only move when the daemon refreshes the
@@ -73,6 +75,7 @@ export default function App() {
           ) : (
             <Routes>
               <Route path="/" element={<MainPage />} />
+              <Route path="/hybrid" element={<HybridPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

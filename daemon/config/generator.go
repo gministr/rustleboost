@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/vpnclient/daemon/subscription"
+	"github.com/vpnclient/daemon/zapret"
 )
 
 // Local ports. These are deliberately off the well-trodden 10808/10809 pair,
@@ -182,7 +183,7 @@ type TransportConfig struct {
 
 type Options struct {
 	TUNMode    bool
-	RouteMode  string // "all" | "ru" | "cn"
+	RouteMode  string // "all" | "ru" | "cn" | "hybrid"
 	DNSMode    string
 	LogLevel   string
 	AllowLAN   bool
@@ -195,6 +196,92 @@ type Options struct {
 	// up. On a censored network the ISP's resolver is the address most likely
 	// to answer, so it is preferred over any fixed public one.
 	SystemDNS []string
+
+	// The fields below apply only when RouteMode == "hybrid".
+
+	// HybridGames are enabled GameProfile IDs — their process names and (once
+	// curated) IP ranges get routed direct, same mechanism as the RU/CN
+	// suffix lists.
+	HybridGames []string
+	// HybridCustomRules are the user's own additions: domains, suffixes,
+	// CIDRs or process names not covered by a built-in game profile.
+	HybridCustomRules []CustomRule
+	// ZapretActive is true only once the DPI-desync engine has actually
+	// started. Discord/YouTube are added to the direct bucket exclusively
+	// behind this flag — sending them direct without the engine running
+	// would just hand their blocked ClientHello straight to the censor.
+	ZapretActive bool
+}
+
+// CustomRule is one user-added routing exception, in hybrid mode, beyond the
+// built-in RU suffixes, zapret domains and game profiles.
+type CustomRule struct {
+	// Type is "domain" | "domain_suffix" | "ip_cidr" | "process_name".
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+// GameProfile bundles the signals one popular game's traffic can be
+// recognised by, so it can be routed direct instead of through the tunnel —
+// multiplayer netcode is latency-sensitive, and there is nothing about it a
+// censor blocks, so there is nothing for the VPN detour to buy here.
+type GameProfile struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// ProcessNames matches the executable that owns the connection. This is
+	// the primary, reliable signal — see the caveat on process matching in
+	// buildRoute: it is not guaranteed to succeed on every connection, which
+	// is exactly why CIDRs exist as a second, independent way to reach the
+	// same traffic.
+	ProcessNames []string `json:"process_names"`
+	// CIDRs are known server/relay ranges for the game's backend (Epic
+	// Online Services, Steam Datagram Relay, Rockstar's own hosting, etc).
+	// Left empty here deliberately: inventing ranges without verifying them
+	// against the vendor's current published list would either leak
+	// unrelated cloud traffic direct (too broad) or silently do nothing (if
+	// wrong) — worse than an honest gap. Fill in once confirmed.
+	CIDRs []string `json:"cidrs"`
+}
+
+// GameProfiles is the built-in catalog the Settings UI offers as toggles.
+// Process names were current at the time of writing; game clients do change
+// their executable name across major updates, so this list is expected to
+// need occasional correction, not just addition.
+var GameProfiles = []GameProfile{
+	{
+		ID:           "fortnite",
+		Name:         "Fortnite",
+		ProcessNames: []string{"FortniteClient-Win64-Shipping.exe", "FortniteLauncher.exe", "EpicGamesLauncher.exe"},
+	},
+	{
+		ID:           "dota2",
+		Name:         "Dota 2",
+		ProcessNames: []string{"dota2.exe"},
+	},
+	{
+		ID:           "cs2",
+		Name:         "Counter-Strike 2",
+		ProcessNames: []string{"cs2.exe"},
+	},
+	{
+		ID:           "gta5online",
+		Name:         "GTA 5 Online",
+		ProcessNames: []string{"GTA5.exe", "GTA5_Enhanced.exe", "PlayGTAV.exe", "SocialClubHelper.exe"},
+	},
+	{
+		ID:           "gta5rp",
+		Name:         "GTA 5 RP (Majestic и другие)",
+		ProcessNames: []string{"FiveM.exe", "FiveM_b2802_GTAProcess.exe", "RAGEMP_v.exe", "gta5.exe"},
+	},
+}
+
+func GameProfileByID(id string) (GameProfile, bool) {
+	for _, p := range GameProfiles {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return GameProfile{}, false
 }
 
 // Router mode values, mirrored from storage.Settings.RouterMode.
@@ -488,6 +575,76 @@ func bypassSuffixes(mode string) []string {
 	return nil
 }
 
+// hybridCustomDomainRules is buildDNS's half of CustomRule: only "domain" and
+// "domain_suffix" entries need a real resolution — ip_cidr and process_name
+// rules match after resolution and have nothing for DNS to do.
+func hybridCustomDomainRules(custom []CustomRule) []DNSRule {
+	var rules []DNSRule
+	for _, c := range custom {
+		v := strings.TrimSpace(c.Value)
+		if v == "" {
+			continue
+		}
+		switch c.Type {
+		case "domain":
+			rules = append(rules, DNSRule{Domain: []string{v}, Server: "local-dns"})
+		case "domain_suffix":
+			rules = append(rules, DNSRule{DomainSuffix: []string{v}, Server: "local-dns"})
+		}
+	}
+	return rules
+}
+
+// hybridGameRules turns enabled GameProfile IDs into route rules. Both
+// signals are added when present — process matching is the reliable one, but
+// is not guaranteed to succeed on every connection (see the comment on the
+// cores' own bypass rule in buildRoute), so the CIDR list is a second,
+// independent way to reach the same traffic when it does not.
+//
+// The CIDR half only matches a connection that reaches sing-box as a literal
+// IP, or whose domain was resolved to a real address rather than FakeIP — a
+// domain-based rule for a game's own hostnames would need to bypass FakeIP
+// the same way RU/CN suffixes do, which is not wired up here because none of
+// the built-in profiles carry one yet.
+func hybridGameRules(gameIDs []string) []RouteRule {
+	var rules []RouteRule
+	for _, id := range gameIDs {
+		profile, ok := GameProfileByID(id)
+		if !ok {
+			continue
+		}
+		if len(profile.ProcessNames) > 0 {
+			rules = append(rules, RouteRule{ProcessName: profile.ProcessNames, Outbound: "direct"})
+		}
+		if len(profile.CIDRs) > 0 {
+			rules = append(rules, RouteRule{IPCIDR: profile.CIDRs, Outbound: "direct"})
+		}
+	}
+	return rules
+}
+
+// hybridCustomRouteRules is buildRoute's half of CustomRule.
+func hybridCustomRouteRules(custom []CustomRule) []RouteRule {
+	var rules []RouteRule
+	for _, c := range custom {
+		v := strings.TrimSpace(c.Value)
+		if v == "" {
+			continue
+		}
+		switch c.Type {
+		case "domain":
+			rules = append(rules, RouteRule{Domain: []string{v}, Outbound: "direct"})
+		case "domain_suffix":
+			rules = append(rules, RouteRule{DomainSuffix: []string{v}, Outbound: "direct"})
+		case "ip_cidr":
+			rules = append(rules, RouteRule{IPCIDR: []string{v}, Outbound: "direct"})
+		case "process_name":
+			rules = append(rules, RouteRule{ProcessName: []string{v}, Outbound: "direct"})
+		}
+	}
+	return rules
+}
+
 // buildDNS resolves names through FakeIP rather than a real upstream.
 //
 // The previous design sent every lookup to DNS-over-HTTPS on 1.1.1.1 and
@@ -523,7 +680,15 @@ func buildDNS(server subscription.Server, opts Options) *DNSConfig {
 	if server.Address != "" && net.ParseIP(server.Address) == nil {
 		rules = append(rules, DNSRule{Domain: []string{server.Address}, Server: "local-dns"})
 	}
-	if suffixes := bypassSuffixes(opts.RouteMode); len(suffixes) > 0 {
+	if opts.RouteMode == "hybrid" {
+		rules = append(rules, DNSRule{DomainSuffix: bypassSuffixes("ru"), Server: "local-dns"})
+		if opts.ZapretActive {
+			rules = append(rules, DNSRule{Domain: zapret.Domains, Server: "local-dns"})
+		}
+		for _, d := range hybridCustomDomainRules(opts.HybridCustomRules) {
+			rules = append(rules, d)
+		}
+	} else if suffixes := bypassSuffixes(opts.RouteMode); len(suffixes) > 0 {
 		rules = append(rules, DNSRule{DomainSuffix: suffixes, Server: "local-dns"})
 	}
 	rules = append(rules,
@@ -652,7 +817,20 @@ func buildRoute(server subscription.Server, opts Options) RouteConfig {
 
 	rules = append(rules, RouteRule{IPIsPrivate: &boolTrue, Outbound: "direct"})
 
-	if suffixes := bypassSuffixes(opts.RouteMode); len(suffixes) > 0 {
+	if opts.RouteMode == "hybrid" {
+		// RU sites direct — hybrid keeps this baseline and only adds to it.
+		rules = append(rules, RouteRule{DomainSuffix: bypassSuffixes("ru"), Outbound: "direct"})
+
+		// Discord/YouTube direct — only once the DPI-desync engine actually
+		// started; otherwise their blocked ClientHello would just reach the
+		// censor plain, same as no VPN at all.
+		if opts.ZapretActive {
+			rules = append(rules, RouteRule{Domain: zapret.Domains, Outbound: "direct"})
+		}
+
+		rules = append(rules, hybridGameRules(opts.HybridGames)...)
+		rules = append(rules, hybridCustomRouteRules(opts.HybridCustomRules)...)
+	} else if suffixes := bypassSuffixes(opts.RouteMode); len(suffixes) > 0 {
 		rules = append(rules, RouteRule{DomainSuffix: suffixes, Outbound: "direct"})
 	}
 
