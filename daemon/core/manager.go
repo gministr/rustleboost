@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -225,6 +226,8 @@ func (m *Manager) Connect(serverID string) error {
 	}
 	resolvedEngine := config.ResolveEngine(selected, opts.RouterMode)
 	usesXray := resolvedEngine == subscription.EngineXray
+	// Kept for the watchdog, which restarts a dead Xray from the same config.
+	var xrayCfg *config.XrayConfig
 
 	engine := "sing-box"
 	if resolvedEngine == subscription.EngineWdtt {
@@ -250,10 +253,11 @@ func (m *Manager) Connect(serverID string) error {
 	} else if usesXray {
 		engine = "sing-box + xray"
 
-		xrayCfg, err := config.GenerateXray(selected, opts)
+		generated, err := config.GenerateXray(selected, opts)
 		if err != nil {
 			return m.failConnect(fmt.Errorf("generate xray config: %w", err))
 		}
+		xrayCfg = generated
 		if err := m.xray.Start(xrayCfg); err != nil {
 			return m.failConnect(fmt.Errorf("xray: %w", err))
 		}
@@ -314,7 +318,7 @@ func (m *Manager) Connect(serverID string) error {
 	session := m.session
 	m.mu.Unlock()
 
-	go m.watchCores(session, usesXray || resolvedEngine == subscription.EngineWarp || resolvedEngine == subscription.EngineWdtt, opts)
+	go m.guardConnection(session, resolvedEngine, xrayCfg, sbCfg, opts)
 
 	m.store.UpdateSettings(func(s *storage.Settings) {
 		s.LastServerID = serverID
@@ -330,35 +334,75 @@ func (m *Manager) Connect(serverID string) error {
 	return nil
 }
 
-// watchCores notices a core dying on its own — a crash, or the server
-// dropping the tunnel — as opposed to the user pressing disconnect.
+// guardConnection supervises a live connection: it restarts a core that died,
+// tests that the proxy leg really carries traffic, and ends the connection
+// honestly when neither helps.
 //
-// session guards against a stale watcher acting on a later connection: every
-// connect bumps the counter, so a watcher whose session no longer matches
+// session guards against a stale watchdog acting on a later connection: every
+// connect bumps the counter, so a watchdog whose session no longer matches
 // simply exits.
-func (m *Manager) watchCores(session uint64, usesXray bool, opts config.Options) {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+func (m *Manager) guardConnection(session uint64, engine string, xrayCfg *config.XrayConfig, sbCfg *config.SingBoxConfig, opts config.Options) {
+	usesChain := engine == subscription.EngineXray ||
+		engine == subscription.EngineWarp || engine == subscription.EngineWdtt
 
-	for range ticker.C {
+	stale := func() bool {
 		m.mu.RLock()
-		stale := m.session != session || m.state != StateConnected
-		m.mu.RUnlock()
-		if stale {
-			return
-		}
-
-		if m.singbox.IsRunning() && (!usesXray || m.chainRunning()) {
-			continue
-		}
-
-		log.Println("[watchdog] a core stopped unexpectedly")
-		m.handleUnexpectedStop(session, opts)
-		return
+		defer m.mu.RUnlock()
+		return m.session != session || m.state != StateConnected
 	}
+
+	hooks := guardHooks{
+		stale:        stale,
+		singboxAlive: m.singbox.IsRunning,
+		restartSingbox: func() error {
+			if stale() {
+				return nil
+			}
+			if err := m.singbox.Start(sbCfg); err != nil {
+				return err
+			}
+			// The connection ended while the core was starting: a core left
+			// running with nobody to stop it would hold the adapter forever.
+			if stale() {
+				m.singbox.Stop()
+			}
+			return nil
+		},
+		giveUp: func(reason string) { m.handleUnexpectedStop(session, opts, reason) },
+		logf:   log.Printf,
+		now:    time.Now,
+		sleep:  time.Sleep,
+	}
+	if usesChain {
+		hooks.chainAlive = m.chainRunning
+	}
+	// Only Xray is restarted and probed. WDTT and WARP rebuild their own
+	// sessions with the VK and Cloudflare, which a blind restart would only
+	// disturb; for them a dead core is reported, as before.
+	if engine == subscription.EngineXray && xrayCfg != nil {
+		hooks.restartChain = func() error {
+			if stale() {
+				return nil
+			}
+			m.xray.Stop()
+			if err := m.xray.Start(xrayCfg); err != nil {
+				return err
+			}
+			if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
+				return err
+			}
+			if stale() {
+				m.xray.Stop()
+			}
+			return nil
+		}
+		hooks.probe = func() bool { return livenessProbe(config.XraySocksPort, 9*time.Second) }
+	}
+
+	runGuard(defaultGuardTiming(), hooks)
 }
 
-func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options) {
+func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options, reason string) {
 	killSwitch := m.store.GetSettings().KillSwitch
 
 	m.singbox.Stop()
@@ -366,6 +410,13 @@ func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options) {
 	ClearSystemProxy()
 
 	message := "соединение с сервером прервано"
+	if reason != "" {
+		message += " (" + reason + ")"
+	}
+	// Why the core stopped is in its log, and the next start overwrites it.
+	if tail := m.coreLogTail(); tail != "" {
+		log.Printf("[watchdog] журнал ядер перед остановкой:\n%s", tail)
+	}
 
 	if killSwitch && opts.TUNMode {
 		// Raise the blocking tunnel before reporting, so there is no window
@@ -388,6 +439,18 @@ func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options) {
 		m.lastError = message
 	}
 	m.mu.Unlock()
+}
+
+// coreLogTail collects the last lines of both cores' logs for the daemon log.
+func (m *Manager) coreLogTail() string {
+	var parts []string
+	if t := strings.TrimSpace(m.singbox.LogTail(6)); t != "" {
+		parts = append(parts, "sing-box:\n"+t)
+	}
+	if t := strings.TrimSpace(m.xray.LogTail(6)); t != "" {
+		parts = append(parts, "xray:\n"+t)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // failConnect rolls the manager back to a clean disconnected state and keeps

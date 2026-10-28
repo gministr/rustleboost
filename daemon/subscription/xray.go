@@ -38,23 +38,15 @@ func fetchXrayJSON(ctx context.Context, subURL string, hwid HWIDHeaders) ([]Serv
 		return nil, err
 	}
 
-	var entries []struct {
-		Remarks   string            `json:"remarks"`
-		Outbounds []json.RawMessage `json:"outbounds"`
-	}
+	var entries []profileEntry
 	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
 		return nil, err
 	}
 
 	var servers []Server
 	for _, entry := range entries {
-		for _, raw := range entry.Outbounds {
-			srv, ok := serverFromOutbound(raw, entry.Remarks)
-			if !ok {
-				continue
-			}
+		if srv, ok := serverForProfile(entry); ok {
 			servers = append(servers, srv)
-			break
 		}
 	}
 	if len(servers) == 0 {
@@ -67,21 +59,15 @@ func fetchXrayJSON(ctx context.Context, subURL string, hwid HWIDHeaders) ([]Serv
 // a URI list: either an array of Xray configs, or a single config object whose
 // outbounds are Xray- or sing-box-shaped.
 func parseJSONPayload(data []byte) ([]Server, error) {
-	type configEnvelope struct {
-		Remarks   string            `json:"remarks"`
-		Outbounds []json.RawMessage `json:"outbounds"`
-	}
+	type configEnvelope = profileEntry
 
 	// An array means one complete config per node.
 	var entries []configEnvelope
 	if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
 		var servers []Server
 		for _, entry := range entries {
-			for _, raw := range entry.Outbounds {
-				if srv, ok := serverFromOutbound(raw, entry.Remarks); ok {
-					servers = append(servers, srv)
-					break
-				}
+			if srv, ok := serverForProfile(entry); ok {
+				servers = append(servers, srv)
 			}
 		}
 		if len(servers) > 0 {
@@ -108,6 +94,130 @@ func parseJSONPayload(data []byte) ([]Server, error) {
 	}
 
 	return nil, fmt.Errorf("no servers found in json subscription")
+}
+
+// profileEntry is one complete Xray config from the subscription — one per
+// node — reduced to the parts that decide which server the node really is.
+type profileEntry struct {
+	Remarks   string            `json:"remarks"`
+	Outbounds []json.RawMessage `json:"outbounds"`
+	Routing   struct {
+		Rules     []map[string]json.RawMessage `json:"rules"`
+		Balancers []struct {
+			Tag      string   `json:"tag"`
+			Selector []string `json:"selector"`
+		} `json:"balancers"`
+	} `json:"routing"`
+}
+
+// ruleConditions are the keys that narrow a routing rule to part of the
+// traffic. A rule with none of them (and covering TCP) takes everything the
+// earlier rules did not.
+var ruleConditions = []string{
+	"domain", "ip", "port", "sourcePort", "source", "sourceIP", "user",
+	"inboundTag", "protocol", "attrs", "localIP", "localPort", "vlessRoute", "process",
+}
+
+// serverForProfile picks the server a profile actually sends traffic to.
+//
+// That is not always the first outbound. The panel puts an outbound it built
+// from the host first, and a host that only carries a template (a third-party
+// server with its own keys) gets a placeholder there: the real server sits
+// further down, reached by a final "all TCP/UDP → that outbound" rule. Taking
+// the first one connects to the placeholder with the wrong keys — the node
+// shows in the list and never works. Xray follows the rules, so this does too.
+//
+// Without such a rule, or when it leads to direct/block, the first usable
+// outbound is taken, as before.
+func serverForProfile(entry profileEntry) (Server, bool) {
+	tag, balancer := catchAllTarget(entry)
+
+	switch {
+	case tag != "":
+		for _, raw := range entry.Outbounds {
+			if outboundTag(raw) != tag {
+				continue
+			}
+			if srv, ok := serverFromOutbound(raw, entry.Remarks); ok {
+				return srv, true
+			}
+		}
+	case balancer != "":
+		// A group: take its first channel. The client has no balancer, so one
+		// server stands for the group.
+		var prefixes []string
+		for _, b := range entry.Routing.Balancers {
+			if b.Tag == balancer {
+				prefixes = b.Selector
+			}
+		}
+		for _, raw := range entry.Outbounds {
+			t := outboundTag(raw)
+			for _, prefix := range prefixes {
+				if prefix != "" && strings.HasPrefix(t, prefix) {
+					if srv, ok := serverFromOutbound(raw, entry.Remarks); ok {
+						return srv, true
+					}
+				}
+			}
+		}
+	}
+
+	for _, raw := range entry.Outbounds {
+		if srv, ok := serverFromOutbound(raw, entry.Remarks); ok {
+			return srv, true
+		}
+	}
+	return Server{}, false
+}
+
+// catchAllTarget finds where the traffic that matched no earlier rule goes:
+// the first rule without conditions that covers TCP.
+func catchAllTarget(entry profileEntry) (outbound, balancer string) {
+	for _, rule := range entry.Routing.Rules {
+		conditional := false
+		for _, key := range ruleConditions {
+			if _, has := rule[key]; has {
+				conditional = true
+				break
+			}
+		}
+		if conditional {
+			continue
+		}
+		// A rule that names no network covers all of them; one that does must
+		// include TCP to be the catch-all for ordinary connections.
+		if raw, ok := rule["network"]; ok {
+			var network string
+			var list []string
+			if json.Unmarshal(raw, &network) != nil && json.Unmarshal(raw, &list) == nil {
+				network = strings.Join(list, ",")
+			}
+			if !strings.Contains(strings.ToLower(network), "tcp") {
+				continue
+			}
+		}
+		jsonString(rule["outboundTag"], &outbound)
+		jsonString(rule["balancerTag"], &balancer)
+		if outbound != "" || balancer != "" {
+			return outbound, balancer
+		}
+	}
+	return "", ""
+}
+
+func jsonString(raw json.RawMessage, into *string) {
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, into)
+	}
+}
+
+func outboundTag(raw json.RawMessage) string {
+	var o struct {
+		Tag string `json:"tag"`
+	}
+	_ = json.Unmarshal(raw, &o)
+	return o.Tag
 }
 
 // serverFromSingBoxOutbound handles subscriptions published as a sing-box
