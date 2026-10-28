@@ -87,11 +87,7 @@ jobs:
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: RustleBoost ${{ github.event.inputs.tag || github.ref_name }}
-          releaseBody: |
-            Установщик для Windows — скачайте `.exe` ниже.
-
-            Установленные копии обновятся сами: приложение проверяет
-            обновления при запуске и раз в 6 часов.
+          releaseBody: Bug Fixes
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
