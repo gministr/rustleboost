@@ -157,6 +157,7 @@ func StopTunnel() {
 
 	t.Close()
 	Stop()
+	stopSRTP()
 }
 
 // TunnelIsRunning сообщает, поднят ли туннель целиком.

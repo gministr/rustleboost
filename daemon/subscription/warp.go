@@ -80,6 +80,11 @@ func parseWdtt(raw string) (Server, error) {
 		"obfs":     q.Get("obfs"),
 		"turnHost": q.Get("turnHost"),
 		"turnPort": q.Get("turnPort"),
+		// SRTP на том же узле (srtp=порт&srtpkey=ключ&srtptok=токен). Нет —
+		// обычный WDTT.
+		"srtp":    q.Get("srtp"),
+		"srtpkey": q.Get("srtpkey"),
+		"srtptok": q.Get("srtptok"),
 	}
 	return Server{
 		ID:       newID(),

@@ -1,0 +1,261 @@
+package proxy
+
+import (
+	"fmt"
+	"net"
+	"sort"
+	"sync"
+)
+
+// WHAT THE 30 OUTER TCP SOCKETS ARE HOLDING — the last unmeasured place on our
+// side of the uplink.
+//
+// 🎯 WHY THIS EXISTS. By 2026-08-11 everything above the socket is accounted for:
+// the server receives 1.01-1.02× of every byte the phone's WireGuard reads from
+// the TUN, `sendch-wait` says a packet waits 1-2 ms for a writer and 19.5 ms at
+// the very worst, and `sendch-block` says the producer is made to wait 0.2% of
+// the time. All of that stops at `conn.Write`.
+//
+// 🚨 AND `conn.Write` RETURNING IS NOT THE PACKET LEAVING. It means the kernel
+// copied the bytes into that connection's send buffer. They can then sit there,
+// behind whatever that connection has already queued, for as long as its TCP
+// takes to drain — and every counter we own still reads "delivered, on time".
+// A packet can be late by tens of milliseconds without a single byte being lost,
+// which is precisely the shape that would let US perturb the inner TCP while
+// looking innocent.
+//
+// 🎯 IT ALSO SETTLES SOMETHING ALREADY IN THE RECORD. The uplink's reordering is
+// currently attributed to "a fixed ~11 ms of RTT SPREAD between connections,
+// i.e. path jitter, not something the fan-out creates" (N-sweep, 2026-08-10).
+// That was concluded without ever looking at the sockets. If the spread is in
+// `srtt` across the 30 connections, it is the paths and the record stands; if it
+// is in `Snd_sbbytes`, it is ours. ⚠️ Note what follows if it is ours: the client
+// pacer, refuted three times, would have a measured reason to come back. That is
+// an argument for measuring carefully, not for expecting either answer.
+//
+// ⚠️⚠️ READ THE FIELD DEFINITION BEFORE QUOTING `sb`. The iOS SDK's own comment
+// on `tcpi_snd_sbbytes` is *"bytes in send socket buffer, INCLUDING IN-FLIGHT
+// DATA"* — so it counts both what is waiting to be sent and what has been sent
+// and not yet acknowledged. Only the first part is queueing delay we add. **It
+// is an UPPER BOUND on the queue, not the queue.** In-flight is bounded by
+// `Snd_cwnd`, which is printed beside it for exactly that reason.
+//
+// Sampling costs one `getsockopt` per connection per memstats tick — 30 calls,
+// read-only, on sockets we opened ourselves. Nothing on the packet path.
+
+// tcpInfo is the platform-independent subset of what a sampler returns.
+type tcpInfo struct {
+	sbBytes uint32 // send socket buffer occupancy, INCLUDING in-flight
+	cwnd    uint32 // congestion window in bytes — bounds the in-flight part
+
+	// sndWnd is how much the far end is willing to accept right now. Added in
+	// build 235 because the first run with this sampler excluded the other two
+	// reasons a send buffer could stop draining: cwnd reached 3 MB and never
+	// collapsed, and the outer TCP lost almost nothing (208 retransmits in a whole
+	// run, loss-recovery flag never set). With congestion and loss out, a full
+	// buffer means the far end is not taking the bytes — which is this field.
+	//
+	// ⚠️ THE SDK'S COMMENT IS ONLY "send widnow in bytes" — it does not say whose.
+	// Reading it as "the window the PEER advertised" is the BSD convention
+	// (`tp->snd_wnd` holds the offered window), which is standard but is an
+	// INFERENCE, not something the header states. Said plainly here because run
+	// 18's whole conclusion rests on it.
+	sndWnd uint32
+
+	// sndWscale is the window scale applied to that window — the scale the RELAY
+	// offered in its SYN-ACK.
+	//
+	// 🚨 IT EXISTS TO KEEP `wnd` HONEST. Run 18 read a flat 41 KiB and concluded
+	// the relay caps each connection at 2.59 Mbit/s. But 41 KiB = 41984 B fits
+	// inside TCP's 16-bit window field, so if the value were ever reported
+	// UNSCALED the true window would be 41984 × 2^wscale — megabytes — and the
+	// conclusion would collapse. BSD keeps `snd_wnd` already scaled, so it should
+	// be fine; printing the scale lets a reader SEE that instead of trusting it.
+	//
+	// ⚠️ It does not SETTLE the question. A capture on the phone does: the
+	// SYN-ACK carries the scale and every ACK carries the raw field, and at the
+	// phone we are the SENDER, which is the right position for in-flight — unlike
+	// the 2026-08-11 reading that was retracted for measuring it at the receiver.
+	sndWscale uint8
+
+	srttMs         uint32 // smoothed RTT of the OUTER connection, ms
+	rttvarMs       uint32
+	rtxPkts        uint64 // cumulative retransmitted packets on this socket
+	inLossRecovery bool
+	reorderingSeen bool
+}
+
+// TCPCI flag bits, from netinet/tcp.h. Kept here rather than pulled from a
+// header so the non-Darwin build has them too.
+const (
+	tcpciFlagLossRecovery       = 0x1
+	tcpciFlagReorderingDetected = 0x2
+)
+
+// sockStats holds the live TCP connections to the relays, by conn index. A
+// connection registers when it is dialled and unregisters before it closes, so a
+// reconnect can never leave the sampler holding a dead socket.
+type sockStats struct {
+	mu    sync.Mutex
+	conns map[int]*net.TCPConn
+
+	// Last cumulative retransmit count per conn index, for per-interval deltas.
+	// Kept per conn rather than as one total because a reconnect restarts the
+	// socket's counter at zero: a global total would go BACKWARDS and print a
+	// negative delta, which reads as "retransmits were undone".
+	lastRtx map[int]uint64
+}
+
+func newSockStats() *sockStats {
+	return &sockStats{conns: map[int]*net.TCPConn{}, lastRtx: map[int]uint64{}}
+}
+
+// register starts sampling a connection. Safe with a nil receiver or a nil conn
+// so the UDP transport path needs no special case.
+func (s *sockStats) register(connIdx int, c net.Conn) {
+	if s == nil || connIdx < 0 {
+		return
+	}
+	tc, ok := c.(*net.TCPConn)
+	if !ok || tc == nil {
+		return
+	}
+	s.mu.Lock()
+	s.conns[connIdx] = tc
+	s.mu.Unlock()
+}
+
+// unregister must run BEFORE the connection is closed. Sampling a closed socket
+// is harmless (the getsockopt fails and the conn is skipped), but holding the
+// reference would keep it reachable.
+func (s *sockStats) unregister(connIdx int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.conns, connIdx)
+	delete(s.lastRtx, connIdx)
+	s.mu.Unlock()
+}
+
+// summary samples every live connection and renders one field group, or "" if
+// nothing could be sampled.
+func (s *sockStats) summary() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	idx := make([]int, 0, len(s.conns))
+	for i := range s.conns {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+
+	var sb, cwnd, srtt, wnd, wscale []int
+	var pairs []sbWnd
+	var rtxDelta uint64
+	var lossRec, reord int
+	for _, i := range idx {
+		info, ok := sampleTCPInfo(s.conns[i])
+		if !ok {
+			continue
+		}
+		sb = append(sb, int(info.sbBytes))
+		cwnd = append(cwnd, int(info.cwnd))
+		srtt = append(srtt, int(info.srttMs))
+		wnd = append(wnd, int(info.sndWnd))
+		wscale = append(wscale, int(info.sndWscale))
+		pairs = append(pairs, sbWnd{sb: int(info.sbBytes), wnd: int(info.sndWnd)})
+		// max(0, …): a reconnect restarts the socket counter, so a smaller
+		// value than last time means "new socket", not "negative retransmits".
+		if prev, seen := s.lastRtx[i]; seen && info.rtxPkts >= prev {
+			rtxDelta += info.rtxPkts - prev
+		}
+		s.lastRtx[i] = info.rtxPkts
+		if info.inLossRecovery {
+			lossRec++
+		}
+		if info.reorderingSeen {
+			reord++
+		}
+	}
+	s.mu.Unlock()
+
+	if len(sb) == 0 {
+		return ""
+	}
+	hotWnd := windowAtDeepestBuffer(pairs)
+	sort.Ints(sb)
+	sort.Ints(cwnd)
+	sort.Ints(srtt)
+	sort.Ints(wnd)
+	pct := func(v []int, f float64) int { return v[int(f*float64(len(v)-1))] }
+	// ⚠️ `sb` includes in-flight (SDK's own words) — cwnd is printed next to it
+	// so a reader can see how much of it could be in flight rather than waiting.
+	// srtt's SPREAD is the number that speaks to "the disorder is RTT spread
+	// between connections": min-max across the pool, in one glance.
+	return fmt.Sprintf(" sock=%d sb=%d/%dKiB cwnd=%dKiB wnd=%d/%dKiB wscale=%s sbmax-wnd=%dKiB srtt=%d/%d-%dms rtx=+%d lossrec=%d reord=%d",
+		len(sb),
+		pct(sb, 0.5)/1024, sb[len(sb)-1]/1024,
+		pct(cwnd, 0.5)/1024,
+		pct(wnd, 0.5)/1024, wnd[0]/1024,
+		formatWscale(wscale),
+		hotWnd/1024,
+		pct(srtt, 0.5), srtt[0], srtt[len(srtt)-1],
+		rtxDelta, lossRec, reord)
+}
+
+// formatWscale renders one number when every connection agrees and a range when
+// they do not.
+//
+// 🎯 Non-uniformity is itself the finding: thirty connections to the same relay
+// should negotiate the same scale, so a range means either the relay is not one
+// machine or something is renegotiating — and either way `wnd` stops being one
+// population and its percentiles stop meaning anything.
+func formatWscale(v []int) string {
+	if len(v) == 0 {
+		return "?"
+	}
+	lo, hi := v[0], v[0]
+	for _, x := range v[1:] {
+		if x < lo {
+			lo = x
+		}
+		if x > hi {
+			hi = x
+		}
+	}
+	if lo == hi {
+		return fmt.Sprintf("%d", lo)
+	}
+	return fmt.Sprintf("%d-%d", lo, hi)
+}
+
+// sbWnd pairs one connection's send-buffer occupancy with the window its peer
+// is advertising, so the two can be reported for the SAME connection.
+type sbWnd struct{ sb, wnd int }
+
+// windowAtDeepestBuffer returns the peer window seen by the connection holding
+// the most data.
+//
+// 🎯 THIS IS THE DECISIVE PAIRING, and it is why a pool-wide minimum is not
+// enough. The question is not "is some connection being throttled" but "is the
+// connection that is BACKED UP the one being throttled". A small window
+// somewhere else in the pool proves nothing; a small window on the conn whose
+// buffer is full is the mechanism.
+//
+// ⚠️ Read it together with `cwnd`: a full buffer with a large cwnd AND a large
+// window is neither congestion nor the peer, and would send this back to the
+// drawing board rather than confirming anything.
+func windowAtDeepestBuffer(p []sbWnd) int {
+	if len(p) == 0 {
+		return 0
+	}
+	best := 0
+	for i := 1; i < len(p); i++ {
+		if p[i].sb > p[best].sb {
+			best = i
+		}
+	}
+	return p[best].wnd
+}

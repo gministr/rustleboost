@@ -1,0 +1,506 @@
+package proxy
+
+// CredPool — the app's credential pool as a standalone value.
+//
+// Stage-5 step 1 (2026-09-06): a second transport (csqtt, pkg/csqtt) must
+// mint, share, pace and cache VK TURN credentials by the SAME policy the
+// native transport does — one pool slot per ~10 connections (VK's quota is
+// per (identity, relay), see connsPerSlot), in cookie mode one slot per
+// relay (2 per call link, no 4× reserve — extra slots would duplicate a
+// relay and 486), the cold-start cap inside get(), the grower's
+// fast-then-staggered fill, the on-disk cache, the pre-bootstrap seed in
+// slot 0, cookie auth and the TURN override — without that transport living
+// inside Proxy. Proxy keeps building its own pool exactly as before
+// (NewProxy → newCredPool with p.fetchFreshCreds), and this wrapper reuses
+// the same credPool type with an injected fetcher.
+//
+// What the wrapper's fetcher does NOT carry is the captcha: the WebView round
+// trip keeps its tokens in Proxy fields, and every acquire here is
+// non-blocking (get(…, false) / tryFill(…, false)), so a captcha fails the
+// fetch with CaptchaRequiredError and the slot cools down — the transport
+// reports "authentication required". No solver is wired on this path by
+// design (a field that is never consulted would be a lie); stage-5 step D
+// (csqtt as a Proxy session mode) brings the app's captcha flow by
+// construction.
+//
+// The grower's state machine exists ONCE — credPool.growLoop below. Both
+// owners wait for their own readiness and run it: Proxy.growCredPool with the
+// captcha-pending predicate, Grow with none. A fix to the fill logic goes
+// there and nowhere else (TestBothGrowersRunTheOneLoop).
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	mathrand "math/rand"
+	"net"
+	"sort"
+	"strings"
+	"sync/atomic"
+	"time"
+)
+
+// CredPoolConfig describes a standalone pool. NumConns sizes it exactly as
+// proxy.Config.NumConns sizes Proxy's (poolSizeForNumConns); the rest mirror
+// the same-named proxy.Config fields.
+type CredPoolConfig struct {
+	VKLink      string        // VK call invite link or bare link id, as proxy.Config.VKLink
+	NumConns    int           // connections the pool must host; pool size = poolSizeForNumConns(NumConns)
+	Cooldown    time.Duration // post-failure skip-fetch window per slot; <=0 → the pool's default (2 min)
+	CachePath   string        // on-disk JSON cache (the app's creds-pool.json); empty disables persistence
+	TurnServer  string        // optional TURN host override (the older pair; TurnServers wins when set)
+	TurnPort    string        // optional TURN port override
+	TurnServers []string      // optional TURN relays, host:port each — applied to EVERY credential when it is handed out, cached ones included (relayhealth.go)
+	// SeededTURN pre-fills slot 0 (the app's pre-bootstrap captcha flow hands
+	// it over), so the first acquire needs no VK call — without it the
+	// captcha lands inside iOS's .connecting window. The override applies to
+	// it as to every credential, when it is handed out (since 2026-10-19).
+	SeededTURN *TURNCreds
+	// Fetch replaces the standard VK fetcher (tests, or another minter). It
+	// must return ("host:port", creds, nil) with creds.Addresses non-empty.
+	Fetch func(allowCaptchaBlock bool, slot int) (string, *TURNCreds, error)
+}
+
+// CredPool wraps the package's credPool for use outside Proxy.
+type CredPool struct {
+	cp       *credPool
+	numConns int
+	linkID   string
+	relayIP  atomic.Value    // string: the host of the last allocation (NoteAllocatedAt)
+	pace     growPace        // set before Grow starts; tests shrink it
+	ctx      context.Context // the pool's own lifetime: the saver, Grow; ended by Close
+	cancel   context.CancelFunc
+}
+
+// CredPoolStats is the pool's state in the shape the app's Stats carries it
+// (CredPoolFilled / WithCreds / Size / DistinctRelays) plus the saturation
+// view used by the bootstrap watchdog.
+type CredPoolStats struct {
+	Available        int // fresh AND not saturated — what a NEW connection can use
+	WithCreds        int // slots holding an unexpired cred (superset of Available)
+	Size             int
+	DistinctRelays   int
+	Saturated        int
+	SaturatedLongest time.Duration
+	QuotaRefusals    int64         // 486s the pool was told of this session (quotabreaker.go)
+	MintPaused       time.Duration // the relay-refusal breaker's pause left; 0 = minting allowed
+}
+
+// NewCredPool builds a standalone pool sized as NewProxy sizes its own —
+// poolSizeForNumConns, or one slot per relay in cookie mode — seeded from
+// SeededTURN when given. The periodic cache saver (when CachePath is set)
+// runs until Close or until ctx ends, and writes the cache once more on its
+// way out.
+func NewCredPool(ctx context.Context, cfg CredPoolConfig) *CredPool {
+	if cfg.NumConns <= 0 {
+		cfg.NumConns = 1
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	p := &CredPool{numConns: cfg.NumConns, linkID: parseVKLinkID(cfg.VKLink), pace: defaultGrowPace, ctx: ctx, cancel: cancel}
+	fetch := cfg.Fetch
+	if fetch == nil {
+		fetch = p.standardFetch(cfg)
+	}
+	size := poolSizeForNumConns(cfg.NumConns)
+	if cookieAuthEnabled.Load() {
+		if n := len(cookieLinks()); n > 0 {
+			size = 2 * n
+		}
+	}
+	p.cp = newCredPool(ctx, size, cfg.Cooldown, cfg.CachePath, fetch)
+	p.cp.setColdStartTarget(cfg.NumConns)
+	p.cp.setOverride(turnOverride{servers: ResolveTURNServers(ctx, cfg.TurnServers, resolvedVKHostIPs), host: cfg.TurnServer, port: cfg.TurnPort}) // names → IPs first (#105)
+	if cfg.SeededTURN != nil {
+		if _, _, err := net.SplitHostPort(cfg.SeededTURN.Address); err == nil {
+			p.cp.seedSlot(0, cfg.SeededTURN.Address, cfg.SeededTURN)
+			if host, ok := relayHostToPublish(cfg.SeededTURN.Address); ok {
+				p.relayIP.Store(host)
+			}
+		} else {
+			log.Printf("credpool: SeededTURN address %q is not host:port (%v) — ignoring", cfg.SeededTURN.Address, err)
+		}
+	}
+	return p
+}
+
+// Close is the transport's stop path: it writes the cache now (so the stop
+// does not depend on the background saver's timing), then ends the pool's
+// lifetime — the periodic saver and Grow stop, and Acquire refuses from here
+// on. A fetch already in flight (a worker's own or the grower's) completes
+// and lands in its slot: VK has the request anyway, and the cache is the
+// better place for its answer than nowhere. Safe to call more than once.
+func (p *CredPool) Close() {
+	if p.cp.cachePath != "" {
+		p.cp.saveToDisk()
+	}
+	p.cancel()
+}
+
+// parseVKLinkID is Proxy.Start's link parsing: the id after "join/", cut at
+// the first "/", "?" or "#".
+func parseVKLinkID(link string) string {
+	id := link
+	if strings.Contains(id, "join/") {
+		parts := strings.Split(id, "join/")
+		id = parts[len(parts)-1]
+	}
+	if i := strings.IndexAny(id, "/?#"); i != -1 {
+		id = id[:i]
+	}
+	return id
+}
+
+// standardFetch is Proxy.fetchFreshCreds without the captcha bookkeeping:
+// cookie auth when enabled (package-level, shared with Proxy), otherwise the
+// anonymous VK Calls path with no solver — a captcha surfaces as
+// CaptchaRequiredError; then the TURN override, then the relay host is
+// published.
+func (p *CredPool) standardFetch(cfg CredPoolConfig) func(bool, int) (string, *TURNCreds, error) {
+	return func(_ bool, slot int) (string, *TURNCreds, error) {
+		var creds *TURNCreds
+		if cookieAuthEnabled.Load() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			c, cerr := cookieCredForSlot(ctx, slot, cfg.TurnServers, p.cp.heldRelaysExcept(slot))
+			cancel()
+			if cerr != nil {
+				if errors.Is(cerr, ErrCookieRejected) {
+					setCookieAuthFatal(cerr.Error())
+				}
+				return "", nil, fmt.Errorf("cookie auth: %w", cerr)
+			}
+			clearCookieAuthFatal()
+			creds = c
+		} else {
+			c, err := GetVKCreds(p.linkID, nil, "", "", 0, 0, "", "")
+			if err != nil {
+				return "", nil, fmt.Errorf("get VK creds: %w", err)
+			}
+			creds = c
+		}
+		// VK's own addresses, all of them, into the pool and the cache; the
+		// override is applied when the credential is handed out, and the
+		// relay IP published at the allocation (NoteAllocatedAt).
+		if creds == nil || len(creds.Addresses) == 0 {
+			return "", nil, errors.New("VK returned no TURN address")
+		}
+		for _, vkAddr := range creds.Addresses {
+			if _, _, err := net.SplitHostPort(vkAddr); err != nil {
+				return "", nil, fmt.Errorf("parse TURN address %q: %w", vkAddr, err)
+			}
+		}
+		creds.Address = creds.Addresses[0]
+		return creds.Addresses[0], creds, nil
+	}
+}
+
+// Acquire hands connIdx a credential by the pool's policy: its own slot
+// (connIdx/10) when that has quota room, any fresh slot otherwise, a fresh
+// mint when allowed by the cold-start cap. The error cases ("paused for
+// path-change settle", "cold-start cap … parking", "no slot available")
+// are the pool's own; the caller parks on SlotAvailable() or a short timer
+// and retries, as Proxy's connections do. Never blocks on a captcha; refuses
+// after Close so a worker racing the stop cannot mint.
+func (p *CredPool) Acquire(connIdx int) (addr string, creds *TURNCreds, slot int, err error) {
+	if p.ctx.Err() != nil {
+		return "", nil, -1, errors.New("credpool: closed")
+	}
+	return p.cp.get(connIdx, false)
+}
+
+// Release returns a connection's hold on its slot (call when the allocation
+// is gone). creds is the credential Acquire handed out with that slot: the
+// slot may have been refilled since, and a release counts only against the
+// credential it names (credPool.release).
+func (p *CredPool) Release(slot int, creds *TURNCreds) { p.cp.release(slot, creds) }
+
+// ReleaseGivenBack is Release for a lease whose ALLOCATION was given back to the
+// relay at `at` (the deallocate written, as far as the caller can tell): the VK
+// relay keeps a deallocated seat on the identity's quota for a second more, and
+// the pool keeps counting it that long — a re-dial is seated elsewhere, or
+// parks, instead of being refused with 486 (seatcool.go). A lease that never
+// held an allocation goes through Release.
+func (p *CredPool) ReleaseGivenBack(slot int, creds *TURNCreds, at time.Time) {
+	p.cp.releaseGivenBack(slot, creds, at)
+}
+
+// MarkSaturated records a 486 (allocation quota reached) on creds, the
+// credential the caller leased from slot, and returns the cooldown applied —
+// zero when the slot no longer holds that credential, or when the refusal is
+// the relay's second behind a seat this side has just given back (nothing is
+// marked either way — seatcool.go).
+func (p *CredPool) MarkSaturated(slot int, creds *TURNCreds) time.Duration {
+	return p.cp.markSaturated(slot, creds)
+}
+
+// NoteAllocated reports that the relay ACCEPTED an allocation on creds, the
+// credential the caller leased from slot — the breaker's success key. The
+// mark counts only while the slot still holds that credential: a late
+// success of a credential the slot has since given up must not certify
+// the one there now (quotabreaker.go).
+func (p *CredPool) NoteAllocated(slot int, creds *TURNCreds) { p.cp.noteAllocated(slot, creds) }
+
+// NoteAllocatedAt is NoteAllocated with the relay that answered and when the
+// attempt began: the relay health's evidence that the network works and that
+// addr is alive (an attempt begun before the last path change is no evidence),
+// and the host RelayIP reports from now on (relayhealth.go).
+func (p *CredPool) NoteAllocatedAt(slot int, creds *TURNCreds, addr string, start time.Time) {
+	p.cp.noteAllocatedAt(slot, creds, addr, start)
+	if host, ok := relayHostToPublish(addr); ok { // an IP or nothing (#105)
+		p.relayIP.Store(host)
+	}
+}
+
+// NoteRelayUnanswered reports an Allocate on addr that got NO answer from
+// the relay — connIdx's attempt on creds, the credential it leased from slot,
+// begun at start. The connection's next attempt takes the next candidate;
+// the relay is marked unreachable only with evidence that the network works
+// (relayhealth.go).
+func (p *CredPool) NoteRelayUnanswered(connIdx, slot int, creds *TURNCreds, addr string, start time.Time) {
+	p.cp.noteRelayUnanswered(connIdx, slot, creds, addr, start)
+}
+
+// IsRelayUnanswered reports an Allocate the relay never answered — a dial
+// timeout, pion's retransmissions run out, a refused connection — as opposed
+// to a STUN error response or this host's own route error.
+func IsRelayUnanswered(err error) bool { return isRelayUnanswered(err) }
+
+// RecordAuthError counts a 401/403 on the slot (pre-kill attribution).
+func (p *CredPool) RecordAuthError(slot int) { p.cp.recordAuthError(slot) }
+
+// InvalidateSlot drops the credential in ONE slot — a 401/403 at
+// allocation means the credential is dead; the pool re-mints into the slot.
+// This is what Proxy's own SRTP session does on an auth error at setup.
+// creds is the rejected credential: a slot that holds another one by now is
+// left alone.
+func (p *CredPool) InvalidateSlot(slot int, creds *TURNCreds) { p.cp.invalidateEntry(slot, creds) }
+
+// IsQuotaError reports a 486 Allocation Quota Reached from the relay: the
+// credential is fine, its allocations are used up — mark the slot
+// saturated, never invalidate it. IsAuthError reports a 401/403: the
+// credential is dead. Both read pion's error text, the same way Proxy's
+// session paths classify their own allocation failures, so a second owner
+// of the pool (csqtt) answers a refusal exactly as Proxy does.
+func IsQuotaError(err error) bool { return isQuotaError(err) }
+
+// IsAuthError — see IsQuotaError.
+func IsAuthError(err error) bool { return isAuthError(err) }
+
+// Invalidate drops every cached credential (a wholesale re-fetch follows).
+func (p *CredPool) Invalidate() { p.cp.invalidate() }
+
+// OnPathChange is what Proxy.OnPathChange does on a path event: replaces the
+// VK session client (its pooled connections may be bound to the interface the
+// event took away), marks the slots in use so the next acquires spread, and
+// pauses acquires briefly so a dual PathMonitor event does not grab fresh
+// slots in the gap.
+func (p *CredPool) OnPathChange() {
+	RotateVKSessionClient()
+	p.cp.MarkInUseSlotsForPathChange()
+}
+
+// ExtendPause lengthens the post-path-change acquire pause (a transition
+// the caller knows is still in progress).
+func (p *CredPool) ExtendPause(d time.Duration) { p.cp.ExtendPauseAcquireForTransition(d) }
+
+// SlotAvailable is closed whenever the pool changes in a way that may let a
+// parked acquire succeed; take a fresh channel after every wake.
+func (p *CredPool) SlotAvailable() <-chan struct{} { return p.cp.slotAvailableChannel() }
+
+// RelayIP is the host of the last allocation, falling back to the first host
+// the pool holds — so it is NOT empty after a warm-cache start, which
+// Proxy.TURNServerIP is (seen 2026-09-05: the console client pinned no relay
+// and the tunnel swallowed its own relay sockets).
+func (p *CredPool) RelayIP() string {
+	if v := p.relayIP.Load(); v != nil {
+		if s, _ := v.(string); s != "" {
+			return s
+		}
+	}
+	if hosts := p.RelayHosts(); len(hosts) > 0 {
+		return hosts[0]
+	}
+	return ""
+}
+
+// RelayHosts lists every distinct relay host the pool holds a credential for
+// (cache included), sorted. Anonymously that is one host.
+func (p *CredPool) RelayHosts() []string {
+	p.cp.mu.Lock()
+	seen := map[string]bool{}
+	for i := range p.cp.pool {
+		e := &p.cp.pool[i]
+		if e.creds == nil || e.addr == "" {
+			continue
+		}
+		if h, _, err := net.SplitHostPort(e.addr); err == nil && h != "" {
+			seen[h] = true
+		}
+	}
+	p.cp.mu.Unlock()
+	out := make([]string, 0, len(seen))
+	for h := range seen {
+		out = append(out, h)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Stats is the pool's state as the app reports it.
+func (p *CredPool) Stats() CredPoolStats {
+	available, withCreds, size := p.cp.snapshotSize()
+	saturated, _, longest := p.cp.saturationSnapshot()
+	refusals, paused := p.cp.quotaSnapshot()
+	return CredPoolStats{
+		Available: available, WithCreds: withCreds, Size: size,
+		DistinctRelays: p.cp.distinctRelays(),
+		Saturated:      saturated, SaturatedLongest: longest,
+		QuotaRefusals: refusals, MintPaused: paused,
+	}
+}
+
+// growPace is the grower's timing as a value, so a test can run the state
+// machine in milliseconds on its own pool without touching package state.
+// Both owners run at defaultGrowPace in production — the numbers live here
+// alone, pinned by TestCredPoolGrowPaceIsPinned.
+type growPace struct {
+	fast, slow, staggerMin, staggerMax, bootstrap time.Duration
+}
+
+var defaultGrowPace = growPace{
+	fast: 2 * time.Second, slow: 30 * time.Second,
+	staggerMin: 120 * time.Second, staggerMax: 300 * time.Second,
+	bootstrap: 2 * time.Minute,
+}
+
+// Grow runs the background fill loop for the pool's lifetime (Close ends
+// it): it waits for `ready` (the transport's first live connection; nil =
+// start now), then runs credPool.growLoop — fast fills until ceil(NumConns/10)
+// slots are usable, the cold-start target, and from then on one slot every
+// 120–300 s so credential expiries stay spread. Fetches never block on a
+// captcha, and no captcha predicate is passed: this owner has no captcha UI.
+func (p *CredPool) Grow(ready <-chan struct{}) {
+	ctx := p.ctx
+	if ready != nil {
+		select {
+		case <-ready:
+		case <-time.After(p.pace.bootstrap):
+			log.Printf("credpool-grow: transport not ready within %s, grower exiting", p.pace.bootstrap)
+			return
+		case <-ctx.Done():
+			return
+		}
+	}
+	p.cp.growLoop(ctx, p.pace, nil)
+}
+
+// growLoop is THE grower: the one fill loop of a credPool, run by both of its
+// owners — Proxy.growCredPool (the native transports, after the bootstrap)
+// and CredPool.Grow (csqtt's standalone pool, after `ready`). It returns when
+// ctx ends.
+//
+//   - Fills with allowCaptchaBlock=false: a background fetch that meets a
+//     captcha records a cooldown on its slot instead of blocking on user input.
+//   - hold reports "a captcha is waiting for the user". While it answers true
+//     a tick adds no VK pressure — no fill, the slow interval: another fetch
+//     could invalidate the captcha session being solved. nil = the owner has
+//     no captcha UI and is never held.
+//   - Fast poll (pace.fast) while the cold-start target is unmet, slow poll
+//     (pace.slow) when every slot is full or on cooldown, a random
+//     pace.staggerMin…staggerMax pause between maintenance fills so creds do
+//     not end up with synchronised expiry timestamps.
+func (cp *credPool) growLoop(ctx context.Context, pace growPace, hold func() bool) {
+	// Cold-start fast-fill target: enough slots to host NumConns at VK's
+	// quota (10 conns/slot, see connsPerSlot in creds.go) — ceil(NumConns/10)
+	// bounded by the pool. ONE number with get()'s cold-start cap, set where
+	// the connection count is known (setColdStartTarget); computed apart, the
+	// two disagreed on the cookie pool (see credPool.coldStartTarget).
+	//
+	//   NumConns 10  → 1 slot fast
+	//   NumConns 30  → 3 slots fast → 9 maintenance (for pool=12)
+	//   NumConns 50  → 5 slots fast → 15 maintenance (for pool=20)
+	//
+	// The user needs JUST ENOUGH usable slots to host the configured conn
+	// count; every slot beyond that is reserve capacity — better to spread its
+	// fill so that 8 h later the expirations are spread too.
+	coldStartSlots := cp.coldStartTargetValue()
+	// Two-mode state machine:
+	//   coldStartMet=false  → fill fast, coldStartSlots passed as tryFill's
+	//                          abort guard so conn-driven fetches racing our
+	//                          mint don't over-shoot the target.
+	//   coldStartMet=true   → one fill per random stagger pause, no guard;
+	//                          each adds one more slot toward a full pool.
+	// The transition is one-way: once the target is met we never return to
+	// fast fill, even if the pool later drops below it (only a cred expiry
+	// does that, and one extra slow refill does not hurt).
+	coldStartMet := false
+	interval := pace.fast
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval):
+		}
+
+		// Don't add VK pressure while a captcha is pending — the tick's first
+		// step, before a slot is even picked.
+		if hold != nil && hold() {
+			interval = pace.slow
+			continue
+		}
+
+		slot := cp.pickSlotToFill()
+		if slot < 0 {
+			// Everything filled or on cooldown — idle poll.
+			interval = pace.slow
+			continue
+		}
+
+		// Pre-fill check — conn-driven fetches may have met the target before
+		// the grower got to this tick: switch to maintenance now, so the fill
+		// below runs as the first maintenance fill (no abort guard) rather
+		// than as a cold-start one that tryFill would abort.
+		if !coldStartMet {
+			if available, _, total := cp.snapshotSize(); available >= coldStartSlots {
+				coldStartMet = true
+				log.Printf("credpool-grow: cold-start target %d reached at pool %d/%d (no fill needed) — switching to maintenance",
+					coldStartSlots, available, total)
+			}
+		}
+
+		// abortIfAvailableGTE: only during cold start, and checked by tryFill
+		// BEFORE the fetch alone — a mint that conn-driven fetches in get() have
+		// already made redundant is not started. A mint that WAS started is
+		// kept even when the target is met while it runs (tryFill's doc says
+		// why). 0 in maintenance: every maintenance fill is meant to add one.
+		abortGuard := 0
+		if !coldStartMet {
+			abortGuard = coldStartSlots
+		}
+
+		success := cp.tryFill(slot, false, abortGuard)
+
+		// After-fill check — this fill may have crossed the threshold.
+		if !coldStartMet {
+			if available, _, total := cp.snapshotSize(); available >= coldStartSlots {
+				coldStartMet = true
+				log.Printf("credpool-grow: cold-start target %d reached at pool %d/%d — switching to maintenance",
+					coldStartSlots, available, total)
+			}
+		}
+
+		if coldStartMet {
+			interval = pace.staggerMin + time.Duration(mathrand.Int63n(int64(pace.staggerMax-pace.staggerMin)))
+			if success {
+				log.Printf("credpool-grow: maintenance fill succeeded, next fill in %v", interval.Round(time.Second))
+			} else {
+				log.Printf("credpool-grow: maintenance fill skipped/failed, next attempt in %v", interval.Round(time.Second))
+			}
+		} else {
+			// Below the target → keep filling fast; tryFill's per-slot cooldown
+			// prevents hammering a dead slot.
+			interval = pace.fast
+		}
+	}
+}

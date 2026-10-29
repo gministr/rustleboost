@@ -9,8 +9,11 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/vpnclient/daemon/subscription"
@@ -133,5 +136,44 @@ func wdttTransportConfig(dataDir string, transport subscription.Server, deviceID
 	if v := p["turnPort"]; v != "" {
 		cfg["turnPort"] = v
 	}
+	// SRTP: тот же узел, другой порт; устройство регистрируется на узле само.
+	// На компьютере ни потолка памяти, ни экономии батареи: предел
+	// соединений транспорта и все ядра процессора.
+	if port, err := strconv.Atoi(p["srtp"]); err == nil && port > 0 && p["srtpkey"] != "" && p["srtptok"] != "" {
+		if key, err := srtpDeviceKey(dataDir); err == nil {
+			cfg["srtpPeer"] = fmt.Sprintf("%s:%d", transport.Address, port)
+			cfg["srtpPublicKey"] = p["srtpkey"]
+			cfg["srtpToken"] = p["srtptok"]
+			cfg["srtpConns"] = srtpConnections
+			cfg["srtpMaxProcs"] = -1
+			cfg["devicePrivateKey"] = key
+		} else {
+			log.Printf("[wdtt] ключ устройства для SRTP недоступен, иду через WDTT: %v", err)
+		}
+	}
 	return cfg, nil
+}
+
+// srtpConnections — соединений SRTP на Windows: предел транспорта. Одна
+// аллокация VK держит около 2 Мбит/с.
+const srtpConnections = 120
+
+// srtpDeviceKey — постоянный ключ WireGuard устройства для узлов SRTP: узел
+// заводит устройство по нему и вычисляет из него адрес, поэтому ключ
+// создаётся один раз и хранится в папке данных.
+func srtpDeviceKey(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, "srtp-device.key")
+	if raw, err := os.ReadFile(path); err == nil {
+		if key := strings.TrimSpace(string(raw)); len(key) == 44 {
+			return key, nil
+		}
+	}
+	key := warpcore.SRTPGenerateDeviceKey()
+	if key == "" {
+		return "", fmt.Errorf("не удалось создать ключ")
+	}
+	if err := os.WriteFile(path, []byte(key), 0o600); err != nil {
+		return "", err
+	}
+	return key, nil
 }

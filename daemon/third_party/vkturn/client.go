@@ -283,6 +283,9 @@ func Resume() { atomic.StoreInt32(&pauseFlag, 0) }
 
 // Statistics возвращает счётчики сессии.
 func Statistics() (bytesUp, bytesDown int64, active int32) {
+	if up, down, act, ok := srtpStatistics(); ok {
+		return up, down, act
+	}
 	stateMu.Lock()
 	c := current
 	stateMu.Unlock()

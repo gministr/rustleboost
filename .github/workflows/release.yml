@@ -87,7 +87,7 @@ jobs:
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: RustleBoost ${{ github.event.inputs.tag || github.ref_name }}
-          releaseBody: Bug Fixes
+          releaseBody: Серверы RustleBoost стали быстрее
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

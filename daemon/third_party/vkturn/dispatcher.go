@@ -191,25 +191,49 @@ func (d *Dispatcher) readLoop() {
 func (d *Dispatcher) writeLoop() {
 	defer d.wg.Done()
 
+	deliver := func(pkt []byte) {
+		addrPtr := d.clientAddr.Load()
+		if addrPtr != nil {
+			if _, err := d.localConn.WriteTo(pkt, *addrPtr); err == nil {
+				d.stats.TotalBytesDown.Add(int64(len(pkt)))
+			}
+		}
+		putPktBuf(pkt)
+	}
+	r := newReorderer(deliver)
+
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
 	for {
 		select {
 		case <-d.ctx.Done():
 			return
 		case pkt := <-d.ReturnCh:
-			addrPtr := d.clientAddr.Load()
-			if addrPtr == nil {
-				putPktBuf(pkt)
-				continue
-			}
-			addr := *addrPtr
-			if _, err := d.localConn.WriteTo(pkt, addr); err != nil {
-				if d.ctx.Err() != nil {
-					putPktBuf(pkt)
-					return
+			r.push(pkt, time.Now())
+			// Всё, что уже пришло, разбирается разом: таймер пересчитывается
+			// один раз на пачку, а не на каждый пакет.
+		drain:
+			for {
+				select {
+				case more := <-d.ReturnCh:
+					r.push(more, time.Now())
+				default:
+					break drain
 				}
 			}
-			d.stats.TotalBytesDown.Add(int64(len(pkt)))
-			putPktBuf(pkt)
+		case <-timer.C:
+			r.expire(time.Now())
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		if wait, ok := r.nextDeadline(time.Now()); ok {
+			timer.Reset(wait)
+		} else {
+			timer.Reset(time.Hour)
 		}
 	}
 }

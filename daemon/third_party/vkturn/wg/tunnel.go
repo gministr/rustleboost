@@ -79,6 +79,7 @@ func startWithBind(
 	if err != nil {
 		return nil, fmt.Errorf("wg: сетевой стек: %w", err)
 	}
+	tuneStack(stack)
 
 	dev := device.NewDevice(tun, bind, newLogger(verbose))
 
@@ -323,4 +324,13 @@ func (t *Tunnel) PeerStats() PeerStats {
 		stats.HandshakeAgo = time.Since(time.Unix(seconds, nanoseconds))
 	}
 	return stats
+}
+
+// StartWithBind — Start с готовым транспортом WireGuard: так поверх
+// SOCKS5 и маршрутизации работает транспорт SRTP (см. vkturn.StartSRTPTunnel).
+func StartWithBind(cfg Config, socksPort int, router *Router, verbose bool, bind conn.Bind) (*Tunnel, error) {
+	// Адрес пира транспорту SRTP не нужен — пакеты уходят в релеи сами, — но
+	// WireGuard без адреса не начнёт рукопожатие.
+	endpoint := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 1)
+	return startWithBind(cfg, endpoint, socksPort, router, verbose, bind)
 }

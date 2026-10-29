@@ -1,6 +1,9 @@
 package warpcore
 
 import (
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -49,6 +52,16 @@ type vkTurnConfig struct {
 	// Предел одновременных соединений. Ноль — по умолчанию (iOS).
 	MaxConnections int  `json:"maxConnections"`
 	Verbose        bool `json:"verbose"`
+
+	// Транспорт SRTP. Задан адрес — туннель поднимается через SRTP, иначе
+	// через WDTT; SOCKS5, маршрутизация и счётчики у обоих одни.
+	SRTPPeer         string `json:"srtpPeer"`
+	SRTPPublicKey    string `json:"srtpPublicKey"`
+	SRTPToken        string `json:"srtpToken"`
+	SRTPConns        int    `json:"srtpConns"`
+	SRTPUDP          bool   `json:"srtpUdp"`
+	SRTPMaxProcs     int    `json:"srtpMaxProcs"`
+	DevicePrivateKey string `json:"devicePrivateKey"`
 }
 
 // Число воркеров по умолчанию.
@@ -68,6 +81,29 @@ func VKTurnStart(configJSON string) error {
 	var config vkTurnConfig
 	if err := json.Unmarshal([]byte(configJSON), &config); err != nil {
 		return fmt.Errorf("vkturn: разбор конфигурации: %w", err)
+	}
+
+	options := vkturn.TunnelOptions{
+		SocksPort:        config.SocksPort,
+		DNSServers:       splitList(config.DNSServers),
+		Routing:          config.Routing,
+		ConfigTimeout:    time.Duration(config.TimeoutSec) * time.Second,
+		MaxConnections:   config.MaxConnections,
+		VerboseWireGuard: config.Verbose,
+	}
+	if config.SRTPPeer != "" {
+		UseSrtpMemoryProfile()
+		return vkturn.StartSRTPTunnel(vkturn.SRTPConfig{
+			Peer:             config.SRTPPeer,
+			VKHashes:         config.VKHashes,
+			Conns:            config.SRTPConns,
+			UDP:              config.SRTPUDP,
+			DevicePrivateKey: config.DevicePrivateKey,
+			ServerPublicKey:  config.SRTPPublicKey,
+			Token:            config.SRTPToken,
+			CredentialsDir:   config.CredentialsDir,
+			MaxProcs:         config.SRTPMaxProcs,
+		}, options)
 	}
 
 	workers := config.Workers
@@ -93,14 +129,7 @@ func VKTurnStart(configJSON string) error {
 			CredentialsDir: config.CredentialsDir,
 			DispatchChunk:  config.DispatchChunk,
 		},
-		vkturn.TunnelOptions{
-			SocksPort:        config.SocksPort,
-			DNSServers:       splitList(config.DNSServers),
-			Routing:          config.Routing,
-			ConfigTimeout:    time.Duration(config.TimeoutSec) * time.Second,
-			MaxConnections:   config.MaxConnections,
-			VerboseWireGuard: config.Verbose,
-		},
+		options,
 	)
 }
 
@@ -170,4 +199,15 @@ func VKTurnResume() { vkturn.Resume() }
 // справился или закрыл окно, — воркер тогда не ждёт до конца таймаута.
 func VKTurnSubmitCaptcha(result string) {
 	vkturn.SubmitCaptcha(result)
+}
+
+// SRTPGenerateDeviceKey создаёт закрытый ключ WireGuard устройства для SRTP,
+// в base64. Хранит его приложение: узел заводит устройство по ключу и
+// вычисляет из него адрес, поэтому ключ должен быть постоянным.
+func SRTPGenerateDeviceKey() string {
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(key.Bytes())
 }
