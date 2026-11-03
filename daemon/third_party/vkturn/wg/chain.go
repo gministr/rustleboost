@@ -170,7 +170,7 @@ func StartChained(outer *Tunnel, cfg Config, remote netip.AddrPort, socksPort in
 	}
 	cfg.MTU = ChainedMTU
 	bind := &chainBind{outer: outer.stack, local: outer.local, remote: remote}
-	return startWithBind(cfg, remote, socksPort, router, verbose, bind)
+	return startWithBind(cfg, remote, socksPort, router, verbose, bind, false)
 }
 
 // ChainedMTU — см. StartChained.

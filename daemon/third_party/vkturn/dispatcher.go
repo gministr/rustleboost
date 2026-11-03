@@ -209,6 +209,10 @@ func (d *Dispatcher) writeLoop() {
 		case <-d.ctx.Done():
 			return
 		case pkt := <-d.ReturnCh:
+			if !reorderEnabled {
+				deliver(pkt)
+				continue
+			}
 			r.push(pkt, time.Now())
 			// Всё, что уже пришло, разбирается разом: таймер пересчитывается
 			// один раз на пачку, а не на каждый пакет.

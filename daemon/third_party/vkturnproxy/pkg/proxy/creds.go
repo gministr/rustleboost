@@ -270,6 +270,10 @@ func GetVKCreds(linkID string, captchaSolver CaptchaSolver, solvedCaptchaSID, so
 	if savedToken1 == "" && solvedCaptchaSID == "" && savedClientID == "" {
 		creds, err := getVKCredsViaVKCallsPath(linkID)
 		if err == nil {
+			if healed := HealRelays(creds.Username, creds.Password, creds.Addresses); len(healed) > 0 {
+				creds.Addresses = healed
+				creds.Address = healed[0]
+			}
 			log.Printf("vk: success via VK Calls captcha-free path")
 			return creds, nil
 		}

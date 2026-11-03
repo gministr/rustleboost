@@ -57,7 +57,7 @@ func Start(
 	router *Router,
 	verbose bool,
 ) (*Tunnel, error) {
-	return startWithBind(cfg, endpoint, socksPort, router, verbose, conn.NewDefaultBind())
+	return startWithBind(cfg, endpoint, socksPort, router, verbose, conn.NewDefaultBind(), false)
 }
 
 // startWithBind — Start с готовым транспортом WireGuard. Обычный путь даёт
@@ -69,6 +69,7 @@ func startWithBind(
 	router *Router,
 	verbose bool,
 	bind conn.Bind,
+	tuneTCP bool,
 ) (*Tunnel, error) {
 	addresses := make([]netip.Addr, 0, len(cfg.Addresses))
 	for _, prefix := range cfg.Addresses {
@@ -79,7 +80,11 @@ func startWithBind(
 	if err != nil {
 		return nil, fmt.Errorf("wg: сетевой стек: %w", err)
 	}
-	tuneStack(stack)
+	// Окно TCP настраивается только под SRTP: WDTT работает с настройками
+	// стека по умолчанию, как до версии 1.5.
+	if tuneTCP {
+		tuneStack(stack)
+	}
 
 	dev := device.NewDevice(tun, bind, newLogger(verbose))
 
@@ -332,5 +337,5 @@ func StartWithBind(cfg Config, socksPort int, router *Router, verbose bool, bind
 	// Адрес пира транспорту SRTP не нужен — пакеты уходят в релеи сами, — но
 	// WireGuard без адреса не начнёт рукопожатие.
 	endpoint := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 1)
-	return startWithBind(cfg, endpoint, socksPort, router, verbose, bind)
+	return startWithBind(cfg, endpoint, socksPort, router, verbose, bind, true)
 }

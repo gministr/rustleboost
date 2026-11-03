@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"github.com/cacggghp/vk-turn-proxy/pkg/proxy"
 	"log"
 	"net"
 	"strings"
@@ -110,6 +111,7 @@ func RunSession(
 	relay, err := tc.Allocate()
 	if err != nil {
 		if isAuthError(err) {
+			proxy.MarkRelayRejected(turnAddr)
 			handleAuthError(creds.CacheStreamID)
 		}
 		errStr := err.Error()

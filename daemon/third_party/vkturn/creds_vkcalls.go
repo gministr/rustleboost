@@ -15,6 +15,7 @@ import (
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
+	"github.com/cacggghp/vk-turn-proxy/pkg/proxy"
 	"github.com/google/uuid"
 )
 
@@ -293,6 +294,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 		return "", "", nil, newVKCallsFailure(step5, vkCallsFailureParse, fmt.Errorf("turn_server.urls empty"))
 	}
 
+	addrs = proxy.HealRelays(user, pass, addrs)
 	log.Printf("[STREAM %d] [VKCalls] SUCCESS, TURN urls=%d", streamID, len(addrs))
 	return user, pass, addrs, nil
 }
