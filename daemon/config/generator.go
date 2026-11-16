@@ -207,20 +207,40 @@ const (
 // ── Xray ──────────────────────────────────────────────────────────────────
 
 type XrayConfig struct {
-	Log       *XrayLog          `json:"log,omitempty"`
-	Inbounds  []interface{}     `json:"inbounds"`
-	Outbounds []json.RawMessage `json:"outbounds"`
-	Routing   *XrayRouting      `json:"routing,omitempty"`
+	Log         *XrayLog          `json:"log,omitempty"`
+	Inbounds    []interface{}     `json:"inbounds"`
+	Outbounds   []json.RawMessage `json:"outbounds"`
+	Routing     *XrayRouting      `json:"routing,omitempty"`
+	Observatory *XrayObservatory  `json:"observatory,omitempty"`
 }
 
 type XrayRouting struct {
-	Rules []XrayRule `json:"rules"`
+	Rules     []XrayRule     `json:"rules"`
+	Balancers []XrayBalancer `json:"balancers,omitempty"`
+}
+
+// XrayBalancer — выбор канала группы по задержке.
+type XrayBalancer struct {
+	Tag         string            `json:"tag"`
+	Selector    []string          `json:"selector"`
+	Strategy    map[string]string `json:"strategy"`
+	FallbackTag string            `json:"fallbackTag,omitempty"`
+}
+
+// XrayObservatory — замер каналов группы силами самого ядра.
+type XrayObservatory struct {
+	SubjectSelector   []string `json:"subjectSelector"`
+	ProbeURL          string   `json:"probeUrl"`
+	ProbeInterval     string   `json:"probeInterval"`
+	EnableConcurrency bool     `json:"enableConcurrency"`
 }
 
 type XrayRule struct {
 	Type        string   `json:"type"`
-	InboundTag  []string `json:"inboundTag"`
-	OutboundTag string   `json:"outboundTag"`
+	InboundTag  []string `json:"inboundTag,omitempty"`
+	Network     string   `json:"network,omitempty"`
+	OutboundTag string   `json:"outboundTag,omitempty"`
+	BalancerTag string   `json:"balancerTag,omitempty"`
 }
 
 type XrayLog struct {
@@ -262,6 +282,42 @@ func GenerateXray(server subscription.Server, opts Options) (*XrayConfig, error)
 	direct, _ := json.Marshal(map[string]string{"tag": "direct", "protocol": "freedom"})
 	block, _ := json.Marshal(map[string]string{"tag": "block", "protocol": "blackhole"})
 
+	outbounds := []json.RawMessage{server.Outbound}
+	var routing *XrayRouting
+	var observatory *XrayObservatory
+	if len(server.Alternatives) > 0 {
+		// Группа: все каналы — «proxy», «proxy-2», … — и балансировщик по
+		// задержке над ними, как на iOS (XrayConfigBuilder). Мёртвые каналы
+		// замер исключает сам; пока замеров нет, трафик идёт в последний
+		// добавленный набор — свежие ключи панели живые вероятнее старых.
+		last := ""
+		for i, alternative := range server.Alternatives {
+			tag := fmt.Sprintf("%s-%d", subscription.ProxyTag, i+2)
+			retagged, err := retagXrayOutbound(alternative, tag)
+			if err != nil {
+				return nil, fmt.Errorf("server %q: group member %d: %w", server.Name, i+2, err)
+			}
+			outbounds = append(outbounds, retagged)
+			last = tag
+		}
+		routing = &XrayRouting{
+			Rules: []XrayRule{{Type: "field", Network: "tcp,udp", BalancerTag: xrayBalancerTag}},
+			Balancers: []XrayBalancer{{
+				Tag:         xrayBalancerTag,
+				Selector:    []string{subscription.ProxyTag},
+				Strategy:    map[string]string{"type": "leastPing"},
+				FallbackTag: last,
+			}},
+		}
+		observatory = &XrayObservatory{
+			SubjectSelector:   []string{subscription.ProxyTag},
+			ProbeURL:          "https://www.gstatic.com/generate_204",
+			ProbeInterval:     "30s",
+			EnableConcurrency: true,
+		}
+	}
+	outbounds = append(outbounds, direct, block)
+
 	return &XrayConfig{
 		Log: &XrayLog{LogLevel: level},
 		Inbounds: []interface{}{
@@ -279,9 +335,14 @@ func GenerateXray(server subscription.Server, opts Options) (*XrayConfig, error)
 				},
 			},
 		},
-		Outbounds: []json.RawMessage{server.Outbound, direct, block},
+		Outbounds:   outbounds,
+		Routing:     routing,
+		Observatory: observatory,
 	}, nil
 }
+
+// xrayBalancerTag — тег балансировщика группы.
+const xrayBalancerTag = "auto"
 
 // ProbeTarget pairs a server with the local port its probe traffic uses.
 type ProbeTarget struct {
@@ -477,6 +538,10 @@ func GenerateBlocking(opts Options) *SingBoxConfig {
 		},
 	}
 }
+
+// BypassSuffixes — домены, которые режим маршрутов пускает напрямую. Прямой
+// путь демона передаёт их ядру теми же правилами.
+func BypassSuffixes(mode string) []string { return bypassSuffixes(mode) }
 
 func bypassSuffixes(mode string) []string {
 	switch mode {

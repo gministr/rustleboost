@@ -113,14 +113,29 @@ func (p *LatencyProber) measureViaProxy(servers []subscription.Server) (map[stri
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	ports, err := reserveProbePorts(len(servers))
+	// У группы меряется каждый канал, и в список идёт лучший: первый канал
+	// бывает старым набором ключей, который уже не отвечает, а ядро при
+	// подключении выберет живой.
+	type probeSlot struct {
+		serverID string
+		outbound []byte
+	}
+	var slotsList []probeSlot
+	for _, s := range servers {
+		slotsList = append(slotsList, probeSlot{s.ID, s.Outbound})
+		for _, alternative := range s.Alternatives {
+			slotsList = append(slotsList, probeSlot{s.ID, alternative})
+		}
+	}
+
+	ports, err := reserveProbePorts(len(slotsList))
 	if err != nil {
 		return nil, err
 	}
 
-	targets := make([]config.ProbeTarget, len(servers))
-	for i, s := range servers {
-		targets[i] = config.ProbeTarget{ServerID: s.ID, Outbound: s.Outbound, Port: ports[i]}
+	targets := make([]config.ProbeTarget, len(slotsList))
+	for i, slot := range slotsList {
+		targets[i] = config.ProbeTarget{ServerID: slot.serverID, Outbound: slot.outbound, Port: ports[i]}
 	}
 
 	cfg, err := config.GenerateXrayProbe(targets)
@@ -139,18 +154,20 @@ func (p *LatencyProber) measureViaProxy(servers []subscription.Server) (map[stri
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, probeConcurrency)
 
-	for i, s := range servers {
+	for i, slot := range slotsList {
 		wg.Add(1)
-		go func(srv subscription.Server, port int) {
+		go func(serverID string, port int) {
 			defer wg.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
 
 			ms := probeThroughSocks(port)
 			mu.Lock()
-			results[srv.ID] = ms
+			if best, seen := results[serverID]; !seen || (ms >= 0 && (best < 0 || ms < best)) {
+				results[serverID] = ms
+			}
 			mu.Unlock()
-		}(s, ports[i])
+		}(slot.serverID, ports[i])
 	}
 	wg.Wait()
 

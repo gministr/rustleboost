@@ -6,9 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/cacggghp/vk-turn-proxy/pkg/proxy"
+	"golang.zx2c4.com/wireguard/tun"
 	"rustleboost/vkturn"
 	"rustleboost/vkturn/wg"
 )
@@ -62,6 +66,31 @@ type vkTurnConfig struct {
 	SRTPUDP          bool   `json:"srtpUdp"`
 	SRTPMaxProcs     int    `json:"srtpMaxProcs"`
 	DevicePrivateKey string `json:"devicePrivateKey"`
+
+	// Запасные релеи ВК через запятую — на случай, когда релей из кредов
+	// их не принимает. Приходят с подпиской; пусто — встроенный список.
+	Relays string `json:"relays"`
+
+	// Прямой путь: дескриптор utun и его адреса через запятую. Ноль — прежний
+	// путь через SOCKS5 и мост.
+	TunFD        int    `json:"tunFd"`
+	TunAddresses string `json:"tunAddresses"`
+	// NativeDevice — прямой путь на интерфейсе, который заранее передал демон
+	// (Windows, SetTunDevice). Дескриптора там нет.
+	NativeDevice bool `json:"nativeDevice"`
+}
+
+// tunDevice — интерфейс для прямого пути на Windows (native_device_windows.go).
+// На остальных системах не задаётся никогда.
+var tunDevice atomic.Pointer[tunDeviceBox]
+
+type tunDeviceBox struct{ device tun.Device }
+
+func currentTunDevice() tun.Device {
+	if box := tunDevice.Load(); box != nil {
+		return box.device
+	}
+	return nil
 }
 
 // Число воркеров по умолчанию.
@@ -83,6 +112,8 @@ func VKTurnStart(configJSON string) error {
 		return fmt.Errorf("vkturn: разбор конфигурации: %w", err)
 	}
 
+	proxy.SetFallbackRelays(splitList(config.Relays))
+
 	options := vkturn.TunnelOptions{
 		SocksPort:        config.SocksPort,
 		DNSServers:       splitList(config.DNSServers),
@@ -90,6 +121,24 @@ func VKTurnStart(configJSON string) error {
 		ConfigTimeout:    time.Duration(config.TimeoutSec) * time.Second,
 		MaxConnections:   config.MaxConnections,
 		VerboseWireGuard: config.Verbose,
+		TunFD:            config.TunFD,
+	}
+	if config.NativeDevice {
+		options.TunDevice = currentTunDevice()
+		if options.TunDevice == nil {
+			return fmt.Errorf("vkturn: прямой путь запрошен, а интерфейс не передан")
+		}
+	}
+	for _, item := range splitList(config.TunAddresses) {
+		if address, err := netip.ParseAddr(item); err == nil {
+			options.TunAddresses = append(options.TunAddresses, address)
+		}
+	}
+	// На прямом пути соединения памяти не стоят, и жёсткий режим только жёг бы
+	// процессор: старый WDTT при следе 22 МБ упирался в потолок 24 МБ и делал по
+	// восемьдесят сборок в секунду. Режим тот же, что в приложении авторов.
+	if config.TunFD > 0 {
+		UseSrtpMemoryProfile()
 	}
 	if config.SRTPPeer != "" {
 		UseSrtpMemoryProfile()
@@ -190,6 +239,18 @@ func VKTurnReadLog() string {
 // VKTurnPause и VKTurnResume приостанавливают отправку, не разрывая
 // аллокации. Нужны при смене сети: поднять аллокации заново дороже, чем
 // переждать переключение.
+// VKTurnNativeUp и VKTurnNativeDown — байты через utun на прямом пути. На прежнем
+// пути счётчики ведёт мост, и здесь нули.
+func VKTurnNativeUp() int64 {
+	up, _, _ := vkturn.CurrentTunnel().NativeTraffic()
+	return up
+}
+
+func VKTurnNativeDown() int64 {
+	_, down, _ := vkturn.CurrentTunnel().NativeTraffic()
+	return down
+}
+
 func VKTurnPause()  { vkturn.Pause() }
 func VKTurnResume() { vkturn.Resume() }
 

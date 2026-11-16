@@ -69,6 +69,11 @@ type Server struct {
 	// It is serialised so the on-disk cache can reconnect after a restart
 	// without waiting for the panel; the UI simply ignores it.
 	Outbound json.RawMessage `json:"outbound,omitempty"`
+	// Alternatives — остальные узлы группы с выбором по задержке (балансировщик
+	// в шаблоне панели): готовые исходящие Xray. Ядро выбирает живой из всех,
+	// как на iOS; без этого группа сводилась к первому узлу — самому старому
+	// набору ключей, который уже не работает.
+	Alternatives []json.RawMessage `json:"alternatives,omitempty"`
 }
 
 // Info mirrors the metadata headers Remnawave attaches to every

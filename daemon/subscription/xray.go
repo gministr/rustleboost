@@ -143,23 +143,37 @@ func serverForProfile(entry profileEntry) (Server, bool) {
 			}
 		}
 	case balancer != "":
-		// A group: take its first channel. The client has no balancer, so one
-		// server stands for the group.
+		// Группа: все её узлы. Первый стоит за пункт в списке, остальные идут
+		// в Xray вместе с ним, и балансировщик выбирает живой (GenerateXray).
 		var prefixes []string
 		for _, b := range entry.Routing.Balancers {
 			if b.Tag == balancer {
 				prefixes = b.Selector
 			}
 		}
+		var group []Server
 		for _, raw := range entry.Outbounds {
 			t := outboundTag(raw)
 			for _, prefix := range prefixes {
 				if prefix != "" && strings.HasPrefix(t, prefix) {
 					if srv, ok := serverFromOutbound(raw, entry.Remarks); ok {
-						return srv, true
+						group = append(group, srv)
 					}
+					break
 				}
 			}
+		}
+		if len(group) > 0 {
+			primary := group[0]
+			for _, member := range group[1:] {
+				primary.Alternatives = append(primary.Alternatives, member.Outbound)
+			}
+			if len(primary.Alternatives) > 0 {
+				// Балансировщик есть только в Xray: группа идёт через него,
+				// даже если первый узел sing-box умеет и сам.
+				primary.Engine = EngineXray
+			}
+			return primary, true
 		}
 	}
 

@@ -55,6 +55,12 @@ type warpConfig struct {
 	// VKTurnStart. Пусто — прямой UDP до Cloudflare (как было раньше).
 	Transport   json.RawMessage `json:"transport,omitempty"`
 	RegisterURL string          `json:"registerUrl"`
+	// NativeDevice — внутренний WireGuard на интерфейсе, переданном демоном
+	// (Windows, SetTunDevice): без SOCKS и стека TCP посередине.
+	NativeDevice bool `json:"nativeDevice"`
+	// TunAddresses — адреса интерфейса через запятую: прямой путь подменяет их
+	// на адрес WireGuard на лету.
+	TunAddresses string `json:"tunAddresses"`
 	RegisterKey string          `json:"registerKey"` // ключ приложения для нашего сервера
 }
 
@@ -397,7 +403,7 @@ func warpRefreshEndpoint(registerURL, appKey string) ([]string, bool) {
 
 	// Коротко: запрос стоит на пути подключения, и недоступный сервер не
 	// должен задерживать его надолго.
-	client := &http.Client{Timeout: 6 * time.Second}
+	client := &http.Client{Timeout: 6 * time.Second, Transport: hookedTransport()}
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, false
@@ -467,7 +473,7 @@ func warpRegister(registerURL, registerKey string) (warpCredentials, error) {
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("CF-Client-Version", "a-6.30-3596")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: hookedTransport()}
 	response, err := client.Do(request)
 	if err != nil {
 		return warpCredentials{}, fmt.Errorf("warp: регистрация: %w", err)
@@ -533,7 +539,7 @@ func warpRegisterVia(url, appKey, publicKey string) (warpCredentials, error) {
 		request.Header.Set("X-App-Key", appKey)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: hookedTransport()}
 	response, err := client.Do(request)
 	if err != nil {
 		return warpCredentials{}, fmt.Errorf("warp: регистрация через сервер: %w", err)
@@ -655,7 +661,29 @@ func warpStartChained(cfg warpConfig) error {
 		return fmt.Errorf("warp: разбор конфигурации: %w", err)
 	}
 
-	tunnel, err := wg.StartChained(outer, parsed, remote, cfg.SocksPort, wg.NewRouter(cfg.Routing), cfg.Verbose)
+	var tunnel *wg.Tunnel
+	if cfg.NativeDevice {
+		device := currentTunDevice()
+		if device == nil {
+			vkturn.StopTunnel()
+			return errors.New("warp: прямой путь запрошен, а интерфейс не передан")
+		}
+		var addresses []netip.Addr
+		for _, item := range splitList(cfg.TunAddresses) {
+			if address, err := netip.ParseAddr(item); err == nil {
+				addresses = append(addresses, address)
+			}
+		}
+		tunnel, err = wg.StartChainedNative(outer, parsed, remote, wg.NativeOptions{
+			Device:       device,
+			TunAddresses: addresses,
+			SocksPort: cfg.SocksPort,
+			Router:    wg.NewRouter(cfg.Routing),
+			Verbose:   cfg.Verbose,
+		})
+	} else {
+		tunnel, err = wg.StartChained(outer, parsed, remote, cfg.SocksPort, wg.NewRouter(cfg.Routing), cfg.Verbose)
+	}
 	if err != nil {
 		vkturn.StopTunnel()
 		return fmt.Errorf("warp: запуск поверх WDTT: %w", err)
@@ -703,4 +731,14 @@ func freeLocalPort() (int, error) {
 	}
 	defer listener.Close()
 	return listener.Addr().(*net.TCPAddr).Port, nil
+}
+
+// hookedTransport — обычный транспорт HTTP с проверкой перед соединением
+// ядра (vkturn.SetDialHook): на Windows запросы к нашему серверу и Cloudflare
+// идут мимо туннеля, как и сам транспорт.
+func hookedTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: vkturn.DialControl}
+	transport.DialContext = dialer.DialContext
+	return transport
 }

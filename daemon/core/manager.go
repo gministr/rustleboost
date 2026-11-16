@@ -69,6 +69,8 @@ type Manager struct {
 	session     uint64 // bumped per connect; identifies the live watchdog
 	connectedAt time.Time
 	subCancel   context.CancelFunc
+	// direct — адаптер прямого пути, пока подключение идёт им (direct.go).
+	direct *directAdapter
 }
 
 func NewManager(dataDir string, store *storage.Store) *Manager {
@@ -150,7 +152,10 @@ func (m *Manager) GetStatus() Status {
 
 	if m.state == StateConnected && !m.connectedAt.IsZero() {
 		status.Stats.Uptime = int64(time.Since(m.connectedAt).Seconds())
-		if stats := m.singbox.GetStats(); stats != nil {
+		if stats, ok := m.directStats(); ok {
+			status.Stats.Upload = stats.Upload
+			status.Stats.Download = stats.Download
+		} else if stats := m.singbox.GetStats(); stats != nil {
 			status.Stats.Upload = stats.Upload
 			status.Stats.Download = stats.Download
 		}
@@ -205,11 +210,18 @@ func (m *Manager) Connect(serverID string) error {
 	}
 
 	selected := *server
+	lingering := m.direct != nil
 	m.state = StateConnecting
 	m.current = &selected
 	m.lastError = ""
 	m.lastWarning = ""
 	m.mu.Unlock()
+
+	// Аварийная блокировка прошлого подключения ещё держит адаптер: снять её,
+	// иначе второй адаптер с тем же идентификатором не создастся.
+	if lingering {
+		m.stopDirect(false)
+	}
 
 	settings := m.store.GetSettings()
 	opts := config.Options{
@@ -229,10 +241,27 @@ func (m *Manager) Connect(serverID string) error {
 	// Kept for the watchdog, which restarts a dead Xray from the same config.
 	var xrayCfg *config.XrayConfig
 
+	// Серверы RustleBoost и WARP в режиме TUN — прямым путём, без sing-box.
+	// Адаптер не создался (нет wintun.dll, отказ драйвера) — прежним путём.
+	if settings.TUNMode && (resolvedEngine == subscription.EngineWdtt || resolvedEngine == subscription.EngineWarp) {
+		err := m.connectDirect(selected, resolvedEngine, opts)
+		if err == nil {
+			m.store.UpdateSettings(func(s *storage.Settings) {
+				s.LastServerID = serverID
+				s.LastServerKey = serverKey(selected)
+			})
+			return nil
+		}
+		if !errors.Is(err, errDirectUnavailable) {
+			return err
+		}
+		log.Printf("[direct] %v — подключаюсь прежним путём через sing-box", err)
+	}
+
 	engine := "sing-box"
 	if resolvedEngine == subscription.EngineWdtt {
 		engine = "sing-box + wdtt"
-		if err := m.wdtt.Start(m.dataDir, selected, config.XraySocksPort, GetHWIDInfo().HWID, false); err != nil {
+		if err := m.wdtt.Start(m.dataDir, selected, config.XraySocksPort, GetHWIDInfo().HWID, false, nil); err != nil {
 			return m.failConnect(fmt.Errorf("wdtt: %w", err))
 		}
 		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
@@ -244,7 +273,7 @@ func (m *Manager) Connect(serverID string) error {
 		if transport == nil {
 			return m.failConnect(fmt.Errorf("WARP: в каталоге нет WDTT-сервера — обновите подписку"))
 		}
-		if err := m.warp.Start(m.dataDir, *transport, config.XraySocksPort, GetHWIDInfo().HWID, false); err != nil {
+		if err := m.warp.Start(m.dataDir, *transport, config.XraySocksPort, GetHWIDInfo().HWID, false, nil); err != nil {
 			return m.failConnect(fmt.Errorf("warp: %w", err))
 		}
 		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
@@ -405,6 +434,12 @@ func (m *Manager) guardConnection(session uint64, engine string, xrayCfg *config
 func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options, reason string) {
 	killSwitch := m.store.GetSettings().KillSwitch
 
+	m.mu.RLock()
+	direct := m.direct != nil
+	m.mu.RUnlock()
+	// На прямом пути аварийная блокировка — сам адаптер: маршруты остаются в
+	// туннеле, ядра нет, и трафик программ никуда не уходит.
+	m.stopDirect(killSwitch && opts.TUNMode)
 	m.singbox.Stop()
 	m.stopChains()
 	ClearSystemProxy()
@@ -418,7 +453,10 @@ func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options, reas
 		log.Printf("[watchdog] журнал ядер перед остановкой:\n%s", tail)
 	}
 
-	if killSwitch && opts.TUNMode {
+	if killSwitch && opts.TUNMode && direct {
+		log.Println("[watchdog] kill switch: адаптер прямого пути держит трафик")
+		message = "соединение прервано. Kill Switch блокирует трафик — нажмите «Отключить», чтобы вернуть обычный доступ"
+	} else if killSwitch && opts.TUNMode {
 		// Raise the blocking tunnel before reporting, so there is no window
 		// in which traffic could reach the network unprotected.
 		if err := m.singbox.Start(config.GenerateBlocking(opts)); err != nil {
@@ -456,6 +494,7 @@ func (m *Manager) coreLogTail() string {
 // failConnect rolls the manager back to a clean disconnected state and keeps
 // the reason so the UI can show it instead of a bare "connection failed".
 func (m *Manager) failConnect(err error) error {
+	m.stopDirect(false)
 	m.singbox.Stop()
 	m.stopChains()
 	ClearSystemProxy()
@@ -476,12 +515,22 @@ func (m *Manager) failConnect(err error) error {
 func (m *Manager) Disconnect() error {
 	m.mu.Lock()
 	if m.state == StateDisconnected {
+		// Соединение уже прервано, но аварийная блокировка (Kill Switch) могла
+		// остаться: адаптер прямого пути или блокирующий sing-box. «Отключить»
+		// обязано её снять, иначе интернет не вернётся до перезапуска.
+		lingering := m.direct != nil
 		m.mu.Unlock()
+		if lingering || m.singbox.IsRunning() {
+			m.stopDirect(false)
+			m.singbox.Stop()
+			log.Println("Kill switch released")
+		}
 		return nil
 	}
 	m.state = StateDisconnecting
 	m.mu.Unlock()
 
+	m.stopDirect(false)
 	if err := m.singbox.Stop(); err != nil {
 		log.Printf("Stop sing-box: %v", err)
 	}

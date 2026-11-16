@@ -52,6 +52,8 @@ type SRTPConfig struct {
 	MaxProcs int
 }
 
+var errAborted = errors.New("запуск прерван")
+
 // srtpProxy — транспорт поднятого туннеля SRTP; читается счётчиками в обход
 // замка туннеля.
 var srtpProxy atomic.Pointer[proxy.Proxy]
@@ -95,29 +97,37 @@ func StartSRTPTunnel(cfg SRTPConfig, options TunnelOptions) error {
 	if cfg.CredentialsDir != "" {
 		cache = filepath.Join(cfg.CredentialsDir, "srtp-creds-pool.json")
 	}
-	p := proxy.NewProxy(proxy.Config{
-		PeerAddr:      cfg.Peer,
-		VKLink:        strings.Join(links, "\n"),
-		UseDTLS:       true,
-		UseUDP:        cfg.UDP,
-		UseSrtp:       true,
-		NumConns:      conns,
-		CredCachePath: cache,
-		// Запас учёток втрое больше авторского (12 мест на 10 соединений):
-		// при быстрой смене сервера места заняты учётками, которые релей ещё
-		// держит после прошлых подключений, и свежую учётку брать некуда.
-		CredPoolSize:   poolSizeFor(conns),
-		RegisterPacket: rbreg.Packet(devicePub, cfg.Token),
-		// Автор держит Go на двух потоках ради батареи — у него в Go только
-		// транспорт. Здесь на тех же потоках ещё WireGuard и TCP-стек gVisor
-		// всех соединений, и на двух потоках скорость упиралась в процессор.
-		GOMAXPROCS: maxProcs(cfg.MaxProcs),
-	})
-	go func() {
-		if err := p.Start(); err != nil {
-			log.Printf("[SRTP] транспорт не поднялся: %v", err)
-		}
-	}()
+	newProxy := func(relays []string) *proxy.Proxy {
+		p := proxy.NewProxy(proxy.Config{
+			PeerAddr:      cfg.Peer,
+			VKLink:        strings.Join(links, "\n"),
+			UseDTLS:       true,
+			UseUDP:        cfg.UDP,
+			UseSrtp:       true,
+			NumConns:      conns,
+			CredCachePath: cache,
+			// Запас учёток втрое больше авторского (12 мест на 10 соединений):
+			// при быстрой смене сервера места заняты учётками, которые релей ещё
+			// держит после прошлых подключений, и свежую учётку брать некуда.
+			CredPoolSize:   poolSizeFor(conns),
+			RegisterPacket: rbreg.Packet(devicePub, cfg.Token),
+			// Автор держит Go на двух потоках ради батареи — у него в Go только
+			// транспорт. Здесь на тех же потоках ещё WireGuard и TCP-стек gVisor
+			// всех соединений, и на двух потоках скорость упиралась в процессор.
+			GOMAXPROCS:  maxProcs(cfg.MaxProcs),
+			TurnServers: relays,
+		})
+		go func() {
+			if err := p.Start(); err != nil {
+				log.Printf("[SRTP] транспорт не поднялся: %v", err)
+			}
+		}()
+		return p
+	}
+
+	relayMemory := srtpRelayMemory{dir: cfg.CredentialsDir}
+	remembered := relayMemory.load(cfg.Peer, time.Now())
+	p := newProxy(remembered)
 	started := false
 	defer func() {
 		if !started {
@@ -131,15 +141,42 @@ func StartSRTPTunnel(cfg SRTPConfig, options TunnelOptions) error {
 	if !registerAbort(abortCancelFn) {
 		return errors.New("vkturn: запуск прерван")
 	}
-	ready := make(chan error, 1)
-	go func() { ready <- p.WaitBootstrap(options.ConfigTimeout) }()
-	select {
-	case err := <-ready:
-		if err != nil {
-			return fmt.Errorf("vkturn: транспорт SRTP: %w", err)
+	wait := func(p *proxy.Proxy, timeout time.Duration) error {
+		ready := make(chan error, 1)
+		go func() { ready <- p.WaitBootstrap(timeout) }()
+		select {
+		case err := <-ready:
+			return err
+		case <-abortCtx.Done():
+			return errAborted
 		}
-	case <-abortCtx.Done():
+	}
+
+	// Связность у релеев ВК не общая: случается, что выданные звонком релеи не
+	// достают до конкретного узла, а другие достают. Рукопожатие через такой релей
+	// просто молчит, и понять это можно только по сроку. Поэтому на первую попытку
+	// отводится половина времени, а вторая идёт через другие релеи: запомненный
+	// путь не сработал — через те, что дал ВК, путь ВК не сработал — через запасные.
+	err = wait(p, options.ConfigTimeout/2)
+	if err != nil && !errors.Is(err, errAborted) {
+		failed := p.TURNServerIP()
+		p.StopWithTimeout(300 * time.Millisecond)
+		var next []string
+		if remembered == nil {
+			next = proxy.RelaysOutside(failed)
+		}
+		log.Printf("[SRTP] через релей %q узел %s не ответил, пробую другие (%d)", failed, cfg.Peer, len(next))
+		p = newProxy(next)
+		err = wait(p, options.ConfigTimeout-time.Since(startedAt))
+		if err == nil {
+			relayMemory.save(cfg.Peer, next, time.Now())
+		}
+	}
+	if errors.Is(err, errAborted) {
 		return errors.New("vkturn: запуск прерван")
+	}
+	if err != nil {
+		return fmt.Errorf("vkturn: транспорт SRTP: %w", err)
 	}
 	log.Printf("[SRTP] транспорт поднят через %d мс, соединений %d, %s до релея",
 		time.Since(startedAt).Milliseconds(), conns, map[bool]string{true: "UDP", false: "TCP"}[cfg.UDP])
@@ -163,8 +200,16 @@ func StartSRTPTunnel(cfg SRTPConfig, options TunnelOptions) error {
 		Keepalive:     25,
 	}
 	wg.SetMaxConnections(options.MaxConnections)
-	t, err := wg.StartWithBind(wgConfig, options.SocksPort, wg.NewRouter(options.Routing),
-		options.VerboseWireGuard, turnbind.NewTURNBind(p))
+	var t *wg.Tunnel
+	if options.Native() {
+		// Адрес пира транспорту не нужен: пакеты уходят в релеи сами, — но без
+		// адреса WireGuard не начнёт рукопожатие.
+		endpoint := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 1)
+		t, err = wg.StartNative(wgConfig, endpoint, turnbind.NewTURNBind(p), options.native())
+	} else {
+		t, err = wg.StartWithBind(wgConfig, options.SocksPort, wg.NewRouter(options.Routing),
+			options.VerboseWireGuard, turnbind.NewTURNBind(p))
+	}
 	if err != nil {
 		return err
 	}

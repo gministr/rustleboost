@@ -105,7 +105,7 @@ func serveSocks(stack stackNet, localAddr netip.Addr, router *Router, client net
 	case cmdConnect:
 		serveConnect(stack, router, client, address)
 	case cmdUDPAssociate:
-		serveUDPAssociate(stack, localAddr, client)
+		serveUDPAssociate(stack, localAddr, router, client)
 	default:
 		_ = writeReply(client, replyCommandNotSupported, net.IPv4zero, 0)
 	}
@@ -135,7 +135,8 @@ func serveConnect(stack stackNet, router *Router, client net.Conn, address strin
 		// расширения в его же туннель не заворачивается, поэтому это
 		// действительно прямой выход с устройства.
 		relay(client, head, func() (net.Conn, error) {
-			return net.DialTimeout("tcp", address, handshakeTimeout)
+			dialer := net.Dialer{Timeout: handshakeTimeout, Control: dialControl}
+			return dialer.Dial("tcp", address)
 		})
 	default:
 		relay(client, head, func() (net.Conn, error) {
@@ -283,7 +284,7 @@ func (c idleConn) Write(p []byte) (int, error) {
 // берётся из заголовка каждой датаграммы, ответы возвращаются оттуда же.
 // Отдельный сокет на каждое назначение означал бы сотни сокетов на один
 // браузерный сеанс QUIC.
-func serveUDPAssociate(stack stackNet, localAddr netip.Addr, control net.Conn) {
+func serveUDPAssociate(stack stackNet, localAddr netip.Addr, router *Router, control net.Conn) {
 	local, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		_ = writeReply(control, replyGeneralFailure, net.IPv4zero, 0)
@@ -318,7 +319,7 @@ func serveUDPAssociate(stack stackNet, localAddr netip.Addr, control net.Conn) {
 	// Адрес клиента известен только с первого пакета: сначала он приходит
 	// сюда, и лишь потом есть куда возвращать ответы.
 	clientAddr := make(chan *net.UDPAddr, 1)
-	go relayFromClient(stack, local, remote, clientAddr, touch)
+	go relayFromClient(stack, router, local, remote, clientAddr, touch)
 	go relayToClient(local, remote, clientAddr, touch)
 
 	// Связка живёт, пока открыто управляющее соединение: так её закрывает
@@ -333,6 +334,7 @@ func serveUDPAssociate(stack stackNet, localAddr netip.Addr, control net.Conn) {
 
 func relayFromClient(
 	stack stackNet,
+	router *Router,
 	local *net.UDPConn,
 	remote net.PacketConn,
 	clientAddr chan<- *net.UDPAddr,
@@ -340,6 +342,13 @@ func relayFromClient(
 ) {
 	buffer := make([]byte, udpBufferSize)
 	announced := false
+
+	// Правила действуют и на датаграммы: без этого QUIC и прочий UDP шли через
+	// туннель всегда, что бы ни говорила сборка маршрутизации.
+	direct := NewDirectUDP(local, func(payload []byte, from *net.UDPAddr) ([]byte, error) {
+		return buildUDPReply(payload, from)
+	}, touch)
+	defer direct.Close()
 
 	for {
 		read, from, err := local.ReadFromUDP(buffer)
@@ -355,6 +364,15 @@ func relayFromClient(
 		payload, target, err := parseUDPRequest(buffer[:read])
 		if err != nil {
 			continue
+		}
+		if router.Active() {
+			switch router.ResolveTarget(target) {
+			case ActionBlock:
+				continue
+			case ActionDirect:
+				_ = direct.Send(from, payload, target)
+				continue
+			}
 		}
 		destination, err := resolveUDPTarget(stack, target)
 		if err != nil {

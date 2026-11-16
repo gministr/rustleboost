@@ -173,5 +173,18 @@ func StartChained(outer *Tunnel, cfg Config, remote netip.AddrPort, socksPort in
 	return startWithBind(cfg, remote, socksPort, router, verbose, bind, false)
 }
 
+// StartChainedNative — StartChained на прямом пути: внутренний WireGuard
+// работает прямо на интерфейсе туннеля (options), а его UDP идёт через
+// внешний туннель. Пользовательский трафик так проходит без единого стека TCP:
+// внешний туннель видит только датаграммы внутреннего.
+func StartChainedNative(outer *Tunnel, cfg Config, remote netip.AddrPort, options NativeOptions) (*Tunnel, error) {
+	if outer == nil || outer.stack == nil {
+		return nil, errors.New("wg: внешний туннель не поднят")
+	}
+	cfg.MTU = ChainedMTU
+	bind := &chainBind{outer: outer.stack, local: outer.local, remote: remote}
+	return StartNative(cfg, remote, bind, options)
+}
+
 // ChainedMTU — см. StartChained.
 const ChainedMTU = 1200

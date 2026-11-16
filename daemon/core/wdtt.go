@@ -22,7 +22,8 @@ type WdttRunner struct {
 
 // Start поднимает WDTT к серверу server на порту socksPort.
 // Блокирует поток: получение конфигурации от сервера занимает секунды.
-func (r *WdttRunner) Start(dataDir string, server subscription.Server, socksPort int, deviceID string, verbose bool) error {
+// extra дополняет конфигурацию ядра (прямой путь: интерфейс, адреса, правила).
+func (r *WdttRunner) Start(dataDir string, server subscription.Server, socksPort int, deviceID string, verbose bool, extra map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.running {
@@ -36,6 +37,9 @@ func (r *WdttRunner) Start(dataDir string, server subscription.Server, socksPort
 		return err
 	}
 	cfg["socksPort"] = socksPort
+	for key, value := range extra {
+		cfg[key] = value
+	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return err

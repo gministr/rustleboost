@@ -19,6 +19,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -26,9 +27,10 @@ import (
 	"github.com/pion/turn/v5"
 )
 
-// FallbackRelays — релеи ВК, через которые неделю шёл трафик пользователей
-// и которые 03.11.2026 принимали свежие креды.
-var FallbackRelays = []string{
+// builtinRelays — релеи ВК, через которые неделю шёл трафик пользователей
+// и которые 03.11.2026 принимали свежие креды. Работают, пока список не
+// пришёл с подпиской.
+var builtinRelays = []string{
 	"91.231.135.85:19302",
 	"90.156.234.249:19302",
 	"193.203.43.31:19302",
@@ -45,6 +47,49 @@ var FallbackRelays = []string{
 	"91.231.135.91:19302",
 	"95.163.34.166:19302",
 	"91.231.135.168:19302",
+}
+
+// FallbackRelays — запасные релеи, которыми пользуется HealRelays.
+var FallbackRelays = builtinRelays
+
+// SetFallbackRelays подменяет запасные релеи списком из подписки: так их
+// можно менять на сервере, не выпуская новую версию. Адрес без порта
+// получает 19302. Пустой или негодный список возвращает встроенный.
+func SetFallbackRelays(list []string) {
+	var out []string
+	seen := map[string]bool{}
+	for _, item := range list {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		host, port, err := net.SplitHostPort(item)
+		if err != nil {
+			host, port = item, "19302"
+		}
+		if net.ParseIP(host) == nil {
+			continue
+		}
+		addr := net.JoinHostPort(host, port)
+		if !seen[addr] {
+			seen[addr] = true
+			out = append(out, addr)
+		}
+	}
+	relayMu.Lock()
+	defer relayMu.Unlock()
+	if len(out) == 0 {
+		FallbackRelays = builtinRelays
+		return
+	}
+	FallbackRelays = out
+	log.Printf("relay: запасных релеев из подписки: %d", len(out))
+}
+
+func fallbackRelays() []string {
+	relayMu.Lock()
+	defer relayMu.Unlock()
+	return FallbackRelays
 }
 
 const (
@@ -105,6 +150,11 @@ func MarkRelayRejected(addr string) { markRelay(addr, false) }
 func probeRelay(addr, user, pass string) error {
 	raddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
+		return err
+	}
+	// Проба шлёт пакеты релею сама: на Windows его адрес закрепляется за
+	// физическим шлюзом до первого пакета (dialhook.go).
+	if err := beforeDialUDP(raddr.String()); err != nil {
 		return err
 	}
 	c, err := net.ListenPacket("udp4", "0.0.0.0:0")
@@ -184,11 +234,12 @@ func HealRelays(user, pass string, addrs []string) []string {
 		}
 	}
 
-	start := rand.IntN(len(FallbackRelays))
+	fallbacks := fallbackRelays()
+	start := rand.IntN(len(fallbacks))
 	var out []string
 	probes := 0
-	for i := 0; i < len(FallbackRelays) && len(out) < relayFallbackCount; i++ {
-		a := FallbackRelays[(start+i)%len(FallbackRelays)]
+	for i := 0; i < len(fallbacks) && len(out) < relayFallbackCount; i++ {
+		a := fallbacks[(start+i)%len(fallbacks)]
 		if bad, _ := relayVerdict(a); bad {
 			continue
 		}
@@ -219,5 +270,27 @@ func HealRelays(user, pass string, addrs []string) []string {
 		return addrs
 	}
 	log.Printf("relay: креды пойдут через %s", strings.Join(out, ", "))
+	return out
+}
+
+// RelaysOutside — запасные релеи не из подсети /24 указанного адреса, вперемешку.
+//
+// Связность у релеев ВК не общая: 07.11.2026 подсеть 193.203.43.x перестала
+// доставать до одного из узлов, а 91.231.x и 90.156.x доставали. Соседний релей
+// той же подсети в таком случае ничего не даёт.
+func RelaysOutside(address string) []string {
+	var prefix netip.Prefix
+	if parsed, err := netip.ParseAddr(relayHost(address)); err == nil && parsed.Is4() {
+		prefix, _ = parsed.Prefix(24)
+	}
+	var out []string
+	for _, relay := range fallbackRelays() {
+		parsed, err := netip.ParseAddr(relayHost(relay))
+		if err != nil || (prefix.IsValid() && prefix.Contains(parsed)) {
+			continue
+		}
+		out = append(out, relay)
+	}
+	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 	return out
 }

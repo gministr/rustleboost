@@ -43,6 +43,8 @@ type Tunnel struct {
 	// Открытый ключ пира — чтобы перевести его на другой адрес, не
 	// пересоздавая туннель, см. SetEndpoint.
 	peerPublicKey string
+	// Устройство прямого пути; nil на прежнем пути через мост.
+	native *nativeDevice
 }
 
 // Start поднимает WireGuard и локальный SOCKS5.

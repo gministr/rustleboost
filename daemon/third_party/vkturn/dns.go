@@ -124,7 +124,7 @@ func resolveViaPublicServers(query []byte) []byte {
 }
 
 func queryDNS(network, server string, query []byte, wantID uint16) []byte {
-	dialer := &net.Dialer{Timeout: dnsPerServerTimeout}
+	dialer := &net.Dialer{Timeout: dnsPerServerTimeout, Control: dialControl}
 	conn, err := dialer.Dial(network, server)
 	if err != nil {
 		return nil

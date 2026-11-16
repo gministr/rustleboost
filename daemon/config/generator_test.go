@@ -480,3 +480,35 @@ func TestPlaceholderNodesAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateXrayGroupUsesBalancer(t *testing.T) {
+	member := func(pw string) json.RawMessage {
+		return json.RawMessage(`{"tag":"proxy","protocol":"trojan","settings":{"servers":[{"address":"a.example.org","port":443,"password":"` + pw + `"}]}}`)
+	}
+	server := subscription.Server{Name: "group", Engine: subscription.EngineXray,
+		Outbound: member("old"), Alternatives: []json.RawMessage{member("b"), member("new")}}
+	cfg, err := GenerateXray(server, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tags []string
+	for _, raw := range cfg.Outbounds {
+		var ob struct{ Tag string }
+		_ = json.Unmarshal(raw, &ob)
+		tags = append(tags, ob.Tag)
+	}
+	if strings.Join(tags, ",") != "proxy,proxy-2,proxy-3,direct,block" {
+		t.Fatalf("исходящие группы: %v", tags)
+	}
+	if cfg.Routing == nil || len(cfg.Routing.Balancers) != 1 || cfg.Routing.Rules[0].BalancerTag != "auto" {
+		t.Fatal("трафик группы не идёт в балансировщик — ушёл бы в первый узел")
+	}
+	if cfg.Routing.Balancers[0].FallbackTag != "proxy-3" || cfg.Observatory == nil {
+		t.Fatal("нет замера каналов или запасной канал не самый свежий")
+	}
+
+	single, _ := GenerateXray(subscription.Server{Name: "one", Outbound: member("x")}, Options{})
+	if single.Routing != nil || single.Observatory != nil {
+		t.Fatal("у одиночного сервера появился балансировщик")
+	}
+}

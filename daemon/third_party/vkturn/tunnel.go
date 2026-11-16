@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.zx2c4.com/wireguard/conn"
+	"golang.zx2c4.com/wireguard/tun"
+
 	"rustleboost/vkturn/wg"
 )
 
@@ -38,6 +41,14 @@ type TunnelOptions struct {
 	// MaxConnections — предел одновременных соединений через WireGuard.
 	// Ноль — значение по умолчанию (под память расширения iOS).
 	MaxConnections int
+	// TunFD — дескриптор utun для прямого пути: WireGuard работает прямо на
+	// интерфейсе, а моста tun2socks нет вовсе. Ноль — прежний путь через SOCKS5.
+	TunFD int
+	// TunDevice — готовый интерфейс вместо дескриптора (Windows: адаптер
+	// Wintun от демона). Задан — тоже прямой путь.
+	TunDevice tun.Device
+	// TunAddresses — адреса, назначенные utun системой.
+	TunAddresses []netip.Addr
 	// DNSServers — запасные адреса на случай, если сервер не назвал свои.
 	//
 	// Без них сетевой стек не умеет разрешать имена вовсе, и датаграмма с
@@ -124,10 +135,15 @@ func StartTunnel(cfg Config, options TunnelOptions) error {
 
 	endpoint := netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), uint16(transportPort))
 	wg.SetMaxConnections(options.MaxConnections)
-	t, err := wg.Start(
-		parsed, endpoint, options.SocksPort,
-		wg.NewRouter(options.Routing), options.VerboseWireGuard,
-	)
+	var t *wg.Tunnel
+	if options.Native() {
+		t, err = wg.StartNative(parsed, endpoint, conn.NewDefaultBind(), options.native())
+	} else {
+		t, err = wg.Start(
+			parsed, endpoint, options.SocksPort,
+			wg.NewRouter(options.Routing), options.VerboseWireGuard,
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -136,6 +152,22 @@ func StartTunnel(cfg Config, options TunnelOptions) error {
 	started = true
 	log.Printf("[ЗАМЕР] Туннель готов через %d мс после старта", time.Since(startedAt).Milliseconds())
 	return nil
+}
+
+// Native — идёт ли туннель прямым путём: есть дескриптор или готовый интерфейс.
+func (o TunnelOptions) Native() bool {
+	return o.TunFD > 0 || o.TunDevice != nil
+}
+
+func (o TunnelOptions) native() wg.NativeOptions {
+	return wg.NativeOptions{
+		TunFD:        o.TunFD,
+		Device:       o.TunDevice,
+		TunAddresses: o.TunAddresses,
+		SocksPort:    o.SocksPort,
+		Router:       wg.NewRouter(o.Routing),
+		Verbose:      o.VerboseWireGuard,
+	}
 }
 
 // StopTunnel снимает WireGuard и транспорт.

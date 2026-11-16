@@ -16,7 +16,7 @@ func wdttServer() subscription.Server {
 }
 
 func TestWarpConfigCarriesWdttTransport(t *testing.T) {
-	raw, err := warpConfigJSON(t.TempDir(), wdttServer(), 21080, "device-1", false)
+	raw, err := warpConfigJSON(t.TempDir(), wdttServer(), 21080, "device-1", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,13 +42,13 @@ func TestWarpConfigCarriesWdttTransport(t *testing.T) {
 func TestWarpRejectsTransportWithoutCredentials(t *testing.T) {
 	bad := wdttServer()
 	bad.Params = map[string]string{"hashes": "h1"}
-	if _, err := warpConfigJSON(t.TempDir(), bad, 21080, "d", false); err == nil {
+	if _, err := warpConfigJSON(t.TempDir(), bad, 21080, "d", false, nil); err == nil {
 		t.Fatal("транспорт без пароля принят")
 	}
 }
 
 func TestWarpRejectsNonWdttTransport(t *testing.T) {
-	if _, err := warpConfigJSON(t.TempDir(), subscription.WarpServer(), 21080, "d", false); err == nil {
+	if _, err := warpConfigJSON(t.TempDir(), subscription.WarpServer(), 21080, "d", false, nil); err == nil {
 		t.Fatal("пункт WARP принят как транспорт")
 	}
 }

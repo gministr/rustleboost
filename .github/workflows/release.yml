@@ -75,6 +75,15 @@ jobs:
               exit 1
             fi
           done
+          # Wintun: адаптер прямого пути для серверов RustleBoost и WARP.
+          # Без него демон откатывается на sing-box, и прямой путь молча
+          # пропадает, поэтому файл сверяется с официальным выпуском 0.14.1
+          # (архив wintun.net, сумма 07c25618…ef51; ниже — сумма самой DLL).
+          actual=$(sha256sum src-tauri/binaries/wintun.dll | cut -d' ' -f1)
+          if [ "$actual" != "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce" ]; then
+            echo "::error::wintun.dll missing or not the official 0.14.1 build ($actual)"
+            exit 1
+          fi
 
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
@@ -87,8 +96,11 @@ jobs:
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: RustleBoost ${{ github.event.inputs.tag || github.ref_name }}
-          releaseBody: ""
+          releaseBody: "Серверы RustleBoost и WARP подключаются напрямую, без лишних звеньев: связь стабильнее и подключение быстрее. Группы серверов сами выбирают работающий канал. Просьба обновиться: старые версии приложения могут работать некорректно."
           releaseDraft: false
-          prerelease: false
+          # Тег с дефисом (v1.6.0-beta.1) — предварительный выпуск: его ставят
+          # вручную по ссылке, а встроенное обновление его не видит
+          # (releases/latest пропускает предварительные).
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
           includeUpdaterJson: true
           updaterJsonPreferNsis: true

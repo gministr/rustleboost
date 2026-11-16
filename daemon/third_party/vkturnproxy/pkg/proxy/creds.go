@@ -2451,6 +2451,28 @@ func (cp *credPool) get(connIdx int, allowCaptchaBlock bool) (string, *TURNCreds
 		}
 	}
 	if target == -1 {
+		// RustleBoost. Third pass: a slot loaded from disk and still pending,
+		// with no connection on it. Every stop stamps the slots in use, so a
+		// few on/off cycles in a row leave the WHOLE pool pending for ten
+		// minutes. Nothing above may touch those, and the phone then waits out
+		// the cooldown with "no slot available" although a fresh credential is
+		// a second away and a new identity has its own quota. The slot waiting
+		// longest goes first: the ones about to come back stay.
+		var latest time.Time
+		for _, slot := range candidatesOrdered() {
+			e := cp.pool[slot]
+			if entryIsPending(e) && e.active == 0 && !e.fetching && !now.Before(e.cooldownUntil) &&
+				e.availableAt.After(latest) {
+				latest = e.availableAt
+				target = slot
+			}
+		}
+		if target >= 0 {
+			log.Printf("credpool: every slot is pending — slot %d gives way to a fresh credential (it would wait %s)",
+				target, latest.Sub(now).Round(time.Second))
+		}
+	}
+	if target == -1 {
 		// Every slot is either saturated with conns still bound, pending, on
 		// cooldown, or being fetched by someone else. Return a descriptive
 		// error so the caller's reconnect loop knows to back off and try

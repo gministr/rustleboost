@@ -39,14 +39,15 @@ type WarpRunner struct {
 
 // Start поднимает WARP через WDTT-сервер transport на порту socksPort.
 // Блокирует поток: регистрация и поднятие WDTT занимают секунды.
-func (r *WarpRunner) Start(dataDir string, transport subscription.Server, socksPort int, deviceID string, verbose bool) error {
+// extra дополняет конфигурацию WARP (прямой путь: интерфейс, адреса, правила).
+func (r *WarpRunner) Start(dataDir string, transport subscription.Server, socksPort int, deviceID string, verbose bool, extra map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.running {
 		return fmt.Errorf("warp: уже запущен")
 	}
 
-	cfg, err := warpConfigJSON(dataDir, transport, socksPort, deviceID, verbose)
+	cfg, err := warpConfigJSON(dataDir, transport, socksPort, deviceID, verbose, extra)
 	if err != nil {
 		return err
 	}
@@ -74,7 +75,7 @@ func (r *WarpRunner) IsRunning() bool {
 }
 
 // warpConfigJSON собирает конфигурацию для ядра: WARP и вложенный WDTT.
-func warpConfigJSON(dataDir string, transport subscription.Server, socksPort int, deviceID string, verbose bool) (string, error) {
+func warpConfigJSON(dataDir string, transport subscription.Server, socksPort int, deviceID string, verbose bool, extra map[string]any) (string, error) {
 	if transport.Engine != subscription.EngineWdtt {
 		return "", fmt.Errorf("warp: транспорт не WDTT")
 	}
@@ -91,6 +92,9 @@ func warpConfigJSON(dataDir string, transport subscription.Server, socksPort int
 		"registerUrl": warpRegisterURL,
 		"registerKey": subscription.CatalogAppKey,
 		"transport":   wdtt,
+	}
+	for key, value := range extra {
+		cfg[key] = value
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {

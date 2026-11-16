@@ -277,6 +277,57 @@ func (r *Router) Resolve(domain string, address netip.Addr) Action {
 	return ActionProxy
 }
 
+// HasDomainRules сообщает, есть ли правила по именам: без них разбирать ответы
+// DNS незачем.
+func (r *Router) HasDomainRules() bool {
+	if r == nil {
+		return false
+	}
+	for index := range r.rules {
+		rule := &r.rules[index]
+		if !rule.domains.empty() || len(rule.keywords) > 0 || len(rule.patterns) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveName ищет правило только по имени: подсети и правило «весь трафик» его
+// не касаются. Нужно прямому пути, где имя известно из ответа DNS, а адреса к нему
+// сопоставляются отдельно.
+func (r *Router) ResolveName(name string) (Action, bool) {
+	if r == nil {
+		return ActionProxy, false
+	}
+	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	if name == "" {
+		return ActionProxy, false
+	}
+	for index := range r.rules {
+		if r.rules[index].matchesName(name) {
+			return r.rules[index].action, true
+		}
+	}
+	return ActionProxy, false
+}
+
+func (c *compiledRule) matchesName(domain string) bool {
+	if c.domains.matches(domain) {
+		return true
+	}
+	for _, keyword := range c.keywords {
+		if strings.Contains(domain, keyword) {
+			return true
+		}
+	}
+	for _, pattern := range c.patterns {
+		if pattern.MatchString(domain) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *compiledRule) matches(domain string, address netip.Addr) bool {
 	if c.all {
 		return true

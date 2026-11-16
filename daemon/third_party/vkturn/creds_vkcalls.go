@@ -143,6 +143,7 @@ func getVKCredsViaVKCallsPath(ctx context.Context, link string, streamID int) (s
 		tlsclient.WithTimeoutSeconds(20),
 		tlsclient.WithClientProfile(profiles.Chrome_146),
 		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
+		tlsclient.WithDialer(hookedDialer()),
 	)
 	if err != nil {
 		return "", "", nil, newVKCallsFailure("setup", vkCallsFailureSetup, fmt.Errorf("create tls client: %w", err))

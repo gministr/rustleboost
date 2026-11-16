@@ -72,6 +72,13 @@ func RunSession(
 	if err != nil {
 		return false, fmt.Errorf("резолв TURN: %w", err)
 	}
+	network := "udp4"
+	if resolved.IP.To4() == nil {
+		network = "udp6"
+	}
+	if err := beforeDial(network, resolved.String()); err != nil {
+		return false, err
+	}
 	c, err := net.DialUDP("udp", nil, resolved)
 	if err != nil {
 		return false, fmt.Errorf("подключение TURN UDP: %w", err)

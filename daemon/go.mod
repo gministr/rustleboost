@@ -3,9 +3,12 @@ module github.com/vpnclient/daemon
 go 1.27.1
 
 require (
+	github.com/cacggghp/vk-turn-proxy v0.0.0
 	github.com/google/uuid v1.6.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/sys v0.47.0
+	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
+	golang.zx2c4.com/wireguard/windows v1.1.1
 	rustleboost/vkturn v0.0.0
 )
 
@@ -18,7 +21,6 @@ require (
 	github.com/bogdanfinn/tls-client v1.14.0 // indirect
 	github.com/bogdanfinn/utls v1.7.7-barnius // indirect
 	github.com/bogdanfinn/websocket v1.5.5-barnius // indirect
-	github.com/cacggghp/vk-turn-proxy v0.0.0 // indirect
 	github.com/cbeuw/connutil v1.0.1 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
@@ -35,12 +37,12 @@ require (
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
+	golang.org/x/exp v0.0.0-20231110203233-9a3e6036ecaa // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	golang.org/x/time v0.10.0 // indirect
+	golang.org/x/time v0.12.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446 // indirect
-	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
+	gvisor.dev/gvisor v0.0.0-20260122175437-89a5d21be8f0 // indirect
 )
 
 replace rustleboost/vkturn => ./third_party/vkturn
