@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { RefreshCw, CheckCircle2, AlertCircle, Copy, Cpu } from "lucide-react";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { getVersion } from "@tauri-apps/api/app";
 import { useVPNStore } from "../store/vpnStore";
 import { Settings, api, HWIDInfo, errorText } from "../api/daemon";
 import { useT, formatHours, Language } from "../i18n";
@@ -10,7 +11,9 @@ import { useT, formatHours, Language } from "../i18n";
 type ReqStatus = "idle" | "loading" | "success" | "error";
 
 /** Kept in step with package.json and tauri.conf.json on every release. */
-const APP_VERSION = "1.3.4";
+// Номер версии берётся из самой сборки (tauri.conf.json): зашитая строка
+// годами показывала 1.3.4, какая бы версия ни стояла.
+const APP_VERSION_FALLBACK = "1.6.1";
 
 /* ── Toggle ─────────────────────────────────────────────────────────── */
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -88,7 +91,16 @@ export default function SettingsPage() {
   const t = useT();
   const [hwid, setHwid] = useState<HWIDInfo | null>(null);
   const [appUpdate, setAppUpdate] = useState<"idle" | "checking" | "downloading">("idle");
-  const [appUpdateMsg, setAppUpdateMsg] = useState(`RustleBoost v${APP_VERSION}`);
+  const [APP_VERSION, setAppVersion] = useState(APP_VERSION_FALLBACK);
+  const [appUpdateMsg, setAppUpdateMsg] = useState(`RustleBoost v${APP_VERSION_FALLBACK}`);
+  useEffect(() => {
+    getVersion()
+      .then(v => {
+        setAppVersion(v);
+        setAppUpdateMsg(`RustleBoost v${v}`);
+      })
+      .catch(() => {});
+  }, []);
 
   // Downloads and installs straight away: a user who pressed "Проверить"
   // has already said yes to updating.
@@ -418,6 +430,9 @@ export default function SettingsPage() {
         </Row>
         <Row icon={icons.shield} label={t("killSwitch")} sub={t("killSwitchSub")}>
           <Toggle checked={settings.kill_switch} onChange={toggle("kill_switch")} />
+        </Row>
+        <Row icon={icons.bolt} label={t("directPath")} sub={t("directPathSub")}>
+          <Toggle checked={!!settings.direct_path} onChange={toggle("direct_path")} />
         </Row>
         <Row icon={icons.bolt} label={t("autoConnect")} sub={t("autoConnectSub")}>
           <Toggle checked={settings.auto_connect} onChange={toggle("auto_connect")} />

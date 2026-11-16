@@ -115,6 +115,7 @@ func (m *Manager) loadCache() {
 
 	m.mu.Lock()
 	m.servers = payload.Servers
+	subscription.AssignStableIDs(m.servers)
 	m.catalog = payload.Catalog
 	m.info = payload.Info
 	m.mu.Unlock()
@@ -206,7 +207,7 @@ func (m *Manager) Connect(serverID string) error {
 	}
 	if server == nil {
 		m.mu.Unlock()
-		return fmt.Errorf("server %s not found", serverID)
+		return fmt.Errorf("сервер не найден в текущем списке — обновите подписку и выберите его ещё раз")
 	}
 
 	selected := *server
@@ -241,9 +242,11 @@ func (m *Manager) Connect(serverID string) error {
 	// Kept for the watchdog, which restarts a dead Xray from the same config.
 	var xrayCfg *config.XrayConfig
 
-	// Серверы RustleBoost и WARP в режиме TUN — прямым путём, без sing-box.
-	// Адаптер не создался (нет wintun.dll, отказ драйвера) — прежним путём.
-	if settings.TUNMode && (resolvedEngine == subscription.EngineWdtt || resolvedEngine == subscription.EngineWarp) {
+	// Серверы RustleBoost и WARP в режиме TUN — прямым путём, без sing-box,
+	// если он включён в настройках (бета). Любой сбой прямого пути — адаптер,
+	// маршруты, ядро на нём — и подключение идёт прежним путём.
+	if settings.TUNMode && settings.DirectPath &&
+		(resolvedEngine == subscription.EngineWdtt || resolvedEngine == subscription.EngineWarp) {
 		err := m.connectDirect(selected, resolvedEngine, opts)
 		if err == nil {
 			m.store.UpdateSettings(func(s *storage.Settings) {
@@ -256,6 +259,10 @@ func (m *Manager) Connect(serverID string) error {
 			return err
 		}
 		log.Printf("[direct] %v — подключаюсь прежним путём через sing-box", err)
+		m.mu.Lock()
+		m.state = StateConnecting
+		m.current = &selected
+		m.mu.Unlock()
 	}
 
 	engine := "sing-box"
@@ -641,6 +648,7 @@ func (m *Manager) UpdateSubscription(subURL string) error {
 		}
 	}
 
+	subscription.AssignStableIDs(result.Servers)
 	m.servers = result.Servers
 	m.info = result.Info
 	m.mu.Unlock()

@@ -2,7 +2,9 @@ package subscription
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -361,3 +363,24 @@ func parseURI(raw string) (Server, error) {
 }
 
 func newID() string { return uuid.NewString() }
+
+// AssignStableIDs даёт серверам идентификаторы, которые не меняются от
+// обновления к обновлению подписки: из группы, имени, адреса, порта,
+// протокола и транспорта. Случайные идентификаторы обновлялись при каждом
+// автообновлении, и интерфейс, державший прежний список, получал при
+// подключении «server … not found».
+func AssignStableIDs(servers []Server) {
+	seen := make(map[string]int, len(servers))
+	for i := range servers {
+		s := &servers[i]
+		sum := sha256.Sum256([]byte(strings.Join([]string{
+			s.Group, s.Name, s.Address, strconv.Itoa(s.Port), s.Protocol, s.Transport, s.Security, s.Engine,
+		}, "\x00")))
+		id := "s" + hex.EncodeToString(sum[:8])
+		seen[id]++
+		if n := seen[id]; n > 1 {
+			id = fmt.Sprintf("%s-%d", id, n)
+		}
+		s.ID = id
+	}
+}

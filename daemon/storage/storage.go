@@ -27,6 +27,10 @@ type Settings struct {
 	// implementation's handshake while letting the other through — so this
 	// is a user choice, not something the app should decide on its own.
 	RouterMode string `json:"router_mode"` // "auto" | "singbox" | "xray"
+	// DirectPath — серверы RustleBoost и WARP прямым путём, без sing-box
+	// (core/direct.go). Бета: по умолчанию выключено, подключение идёт
+	// прежним путём; при сбое прямого пути — тоже прежним.
+	DirectPath bool `json:"direct_path"`
 }
 
 type Store struct {

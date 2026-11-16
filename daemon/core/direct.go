@@ -173,9 +173,8 @@ func (m *Manager) startDirectCore(adapter *directAdapter, engine string, selecte
 	return nil
 }
 
-// connectDirect — подключение прямым путём. errDirectUnavailable означает,
-// что адаптер не создан и вызывающий идёт прежним путём; другие ошибки уже
-// оформлены failConnect.
+// connectDirect — подключение прямым путём. Любая неудача возвращается как
+// errDirectUnavailable: всё поднятое снято, и вызывающий идёт прежним путём.
 func (m *Manager) connectDirect(selected subscription.Server, engine string, opts config.Options) error {
 	mtu := directMTU
 	if engine == subscription.EngineWarp {
@@ -199,7 +198,8 @@ func (m *Manager) connectDirect(selected subscription.Server, engine string, opt
 	m.mu.Unlock()
 
 	if err := m.startDirectCore(adapter, engine, selected, opts); err != nil {
-		return m.failConnect(err)
+		m.stopDirect(false)
+		return fmt.Errorf("%w: ядро: %v", errDirectUnavailable, err)
 	}
 
 	// Канал проверен настоящим запросом — только теперь трафик программ идёт
@@ -216,7 +216,8 @@ func (m *Manager) connectDirect(selected subscription.Server, engine string, opt
 		log.Printf("[direct] канал не ответил за %s", tunnelReadyTimeout)
 	}
 	if err := adapter.platform.activate(); err != nil {
-		return m.failConnect(fmt.Errorf("перевод трафика в туннель: %w", err))
+		m.stopDirect(false)
+		return fmt.Errorf("%w: перевод трафика в туннель: %v", errDirectUnavailable, err)
 	}
 
 	m.mu.Lock()

@@ -117,11 +117,14 @@ func (w *windowsDirect) activate() error {
 			Metric:      0,
 		})
 	}
-	if err := w.luid.SetRoutesForFamily(windows.AF_INET, routes); err != nil {
+	// «Элемент не найден»: Windows ещё не довела интерфейс адаптера до
+	// состояния, когда на него можно ставить маршруты, — повторяем, как
+	// официальный клиент WireGuard (tunnel/addressconfig.go, startOver).
+	if err := retryNotFound(func() error { return w.luid.SetRoutesForFamily(windows.AF_INET, routes) }); err != nil {
 		return fmt.Errorf("маршруты в туннель: %w", err)
 	}
 	w.routed = true
-	if err := w.luid.SetDNS(windows.AF_INET, directDNS, nil); err != nil {
+	if err := retryNotFound(func() error { return w.luid.SetDNS(windows.AF_INET, directDNS, nil) }); err != nil {
 		w.deactivate()
 		return fmt.Errorf("DNS туннеля: %w", err)
 	}

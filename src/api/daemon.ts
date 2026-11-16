@@ -90,6 +90,8 @@ export interface Settings {
    * choice, not something decided automatically.
    */
   router_mode: "auto" | "singbox" | "xray";
+  /** Серверы RustleBoost и WARP прямым путём, без sing-box (бета). */
+  direct_path?: boolean;
 }
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

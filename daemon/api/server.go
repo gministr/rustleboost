@@ -192,6 +192,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			s.KillSwitch = incoming.KillSwitch
 			s.AllowLAN = incoming.AllowLAN
 			s.TUNMode = incoming.TUNMode
+			s.DirectPath = incoming.DirectPath
 			if incoming.RouteMode != "" {
 				s.RouteMode = incoming.RouteMode
 			}

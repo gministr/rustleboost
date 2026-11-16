@@ -93,6 +93,8 @@ const ru = {
   // Settings — connection
   tunMode: "TUN Mode",
   tunModeSub: "Системный VPN-интерфейс RustleBoost (все приложения)",
+  directPath: "Прямой путь (бета)",
+  directPathSub: "Серверы RustleBoost и WARP без промежуточного ядра. Если не встанет — подключение пойдёт обычным путём",
   killSwitch: "Kill Switch",
   killSwitchSub: "Блокировать трафик, если VPN неожиданно оборвётся",
   autoConnect: "Автоподключение",
@@ -197,6 +199,8 @@ const en: Dictionary = {
 
   tunMode: "TUN Mode",
   tunModeSub: "System-wide RustleBoost VPN interface (all apps)",
+  directPath: "Direct path (beta)",
+  directPathSub: "RustleBoost and WARP servers without the intermediate core. Falls back to the usual path if it fails",
   killSwitch: "Kill Switch",
   killSwitchSub: "Block traffic if the VPN drops unexpectedly",
   autoConnect: "Auto-connect",
