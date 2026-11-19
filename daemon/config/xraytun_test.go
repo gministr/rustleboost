@@ -103,9 +103,6 @@ func TestTunXrayMatchesPhoneRules(t *testing.T) {
 	if outbounds[0].(map[string]any)["tag"] != subscription.ProxyTag {
 		t.Fatal("первый исходящий — не сервер")
 	}
-	if m["log"].(map[string]any)["loglevel"] != "warning" {
-		t.Fatal("журнал ядра слишком подробный")
-	}
 }
 
 func TestTunXrayGroupHasCatchAllByAddress(t *testing.T) {

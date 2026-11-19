@@ -141,6 +141,7 @@ const ru = {
   "error.connect": "Не удалось подключиться",
   "error.subscription": "Не удалось загрузить подписку",
   "warning.title": "Внимание",
+  "starting": "Запуск службы RustleBoost…",
 } as const;
 
 export type StringKey = keyof typeof ru;
@@ -273,6 +274,7 @@ const en: Record<StringKey, string> = {
   "error.connect": "Could not connect",
   "error.subscription": "Could not load the subscription",
   "warning.title": "Warning",
+  "starting": "Starting RustleBoost service…",
 };
 
 export function translate(lang: string, key: StringKey, vars?: Record<string, string | number>): string {

@@ -193,7 +193,10 @@ func GenerateTunXray(in TunXrayInput) ([]byte, error) {
 		}}
 	}
 
-	logSection := map[string]any{"loglevel": "warning"}
+	// Проверочная версия: подробный журнал (соединения с адаптера и их
+	// маршрут) — пока ищем, где рвётся трафик в Windows. Перед выпуском
+	// вернуть "warning".
+	logSection := map[string]any{"loglevel": "info"}
 	if in.LogPath != "" {
 		logSection["error"] = in.LogPath
 		logSection["access"] = "none"

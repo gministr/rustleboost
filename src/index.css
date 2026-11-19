@@ -102,3 +102,4 @@ input, textarea { user-select: text; }
 .server-row:hover { background: color-mix(in srgb, var(--text-secondary) 6%, transparent); }
 .menu-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .win-close:hover { background: rgb(232 17 35); color: #fff !important; }
+.fluent-toggle:hover:not(:disabled) .fluent-knob { width: 14px !important; height: 14px !important; }

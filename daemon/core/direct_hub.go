@@ -73,6 +73,7 @@ func (h *directHub) session() *directSession {
 		packets: make(chan []byte, directQueue),
 		done:    make(chan struct{}),
 		events:  make(chan tun.Event, 1),
+		wake:    make(chan struct{}, 1),
 	}
 	s.events <- tun.EventUp
 	if old := h.current.Swap(s); old != nil {
@@ -99,6 +100,11 @@ type directSession struct {
 	packets   chan []byte
 	done      chan struct{}
 	events    chan tun.Event
+	// wake прерывает ожидающий Read (WakeRead): ядру надо отправить пакет
+	// своего внутреннего стека — проверку канала, DNS, SOCKS. Без этого такой
+	// пакет ждал, пока в адаптер придёт пакет какой-нибудь программы, и
+	// проверка канала каждый раз висела все 15 секунд.
+	wake      chan struct{}
 	closeOnce sync.Once
 }
 
@@ -119,8 +125,20 @@ func (s *directSession) Read(bufs [][]byte, sizes []int, offset int) (int, error
 	case packet := <-s.packets:
 		sizes[0] = copy(bufs[0][offset:], packet)
 		return 1, nil
+	case <-s.wake:
+		// Ядро (vkturn/wg nativeDevice) понимает этот ответ как «прервано
+		// сроком» и забирает свой пакет из очереди.
+		return 0, os.ErrDeadlineExceeded
 	case <-s.done:
 		return 0, os.ErrClosed
+	}
+}
+
+// WakeRead прерывает Read — см. поле wake.
+func (s *directSession) WakeRead() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
 	}
 }
 

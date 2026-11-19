@@ -121,6 +121,10 @@ func wdttTransportConfig(dataDir string, transport subscription.Server, deviceID
 	if obfs == "" {
 		obfs = wdttDefaultObfs
 	}
+	// Кеш учётных данных релеев ВК: папку на iOS создаёт приложение, здесь —
+	// служба. Без неё кеш не сохранялся, и каждое подключение заново шло к ВК.
+	credentialsDir := filepath.Join(dataDir, "wdtt-credentials")
+	_ = os.MkdirAll(credentialsDir, 0o700)
 	cfg := map[string]any{
 		"peerAddress":    fmt.Sprintf("%s:%d", transport.Address, transport.Port),
 		"vkHashes":       hashes,
@@ -130,7 +134,7 @@ func wdttTransportConfig(dataDir string, transport subscription.Server, deviceID
 		"workers":        workers,
 		"obfsMode":       obfs,
 		"captchaMode":    "rjs",
-		"credentialsDir": filepath.Join(dataDir, "wdtt-credentials"),
+		"credentialsDir": credentialsDir,
 		"maxConnections": wdttMaxConnections,
 		"verbose":        verbose,
 	}

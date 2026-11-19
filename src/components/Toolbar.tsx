@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, ReactNode } from "react";
-import { ChevronLeft, ClipboardPaste, Keyboard, Minus, Plus, Settings, X } from "lucide-react";
+import { ArrowLeft, ClipboardPaste, Keyboard, Minus, Plus, Settings, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Wordmark from "./Wordmark";
 import { ToolbarButton } from "./ui";
@@ -67,8 +67,9 @@ export default function Toolbar({ title, onBack }: { title?: string; onBack?: ()
   return (
     <div className="drag" style={{ height: 56, flexShrink: 0, display: "flex", alignItems: "center", gap: 8, padding: "0 10px 0 14px", position: "relative" }}>
       {minimal ? null : onBack ? (
-        <button onClick={onBack} className="no-drag row-hover" style={{ display: "flex", alignItems: "center", gap: 2, color: "var(--accent)", fontSize: 14, fontWeight: 700, padding: "6px 8px 6px 2px", borderRadius: 8 }}>
-          <ChevronLeft size={20} strokeWidth={2.4} />{t("common.back")}
+        <button onClick={onBack} title={t("common.back")} aria-label={t("common.back")} className="no-drag row-hover"
+          style={{ width: 36, height: 32, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-primary)" }}>
+          <ArrowLeft size={18} strokeWidth={2} />
         </button>
       ) : (
         <ToolbarButton title={t("settings.title")} onClick={() => setPage("settings")} badge={unread}><Settings size={17} strokeWidth={2.2} /></ToolbarButton>

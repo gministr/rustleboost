@@ -6,6 +6,25 @@ import SupportPage from "./pages/Support";
 import Entry from "./pages/Entry";
 import { useApp } from "./state/store";
 import { useT } from "./lib/strings";
+import { useIsDark } from "./lib/theme";
+import { Spinner } from "./components/ui";
+import logoLight from "./assets/logo-light.webp";
+import logoDark from "./assets/logo-dark.webp";
+
+/** Пока служба запускается (несколько секунд после разрешения UAC) — знак
+ *  и индикатор, а не пустое окно. */
+function Starting() {
+  const t = useT();
+  const isDark = useIsDark();
+  const down = useApp(s => s.daemonDown);
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
+      <img src={isDark ? logoDark : logoLight} alt="" draggable={false} style={{ height: 96, objectFit: "contain" }} />
+      <Spinner size={20} />
+      <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>{down ? t("error.daemon") : t("starting")}</div>
+    </div>
+  );
+}
 
 // Корень окна. Как на Mac, настройки и поддержка — страницы в том же окне, а
 // не отдельные окна: панель сверху превращается в «Назад».
@@ -23,7 +42,7 @@ export default function App() {
 
   let content;
   if (!ready) {
-    content = <div style={{ flex: 1 }} />;
+    content = <Starting />;
   } else if (!hasSubscription) {
     content = <Entry />;
   } else if (page === "settings") {

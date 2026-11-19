@@ -12,7 +12,8 @@ export function Spinner({ size = 14 }: { size?: number }) {
   return <LoaderCircle size={size} className="spin" style={{ color: "var(--text-secondary)" }} />;
 }
 
-/** Переключатель в духе iOS. */
+/** Переключатель в стиле Windows 11 (Fluent): капсула 40×20 с кругом.
+ *  Выключен — только обводка, включён — заливка фирменным цветом. */
 export function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
     <button
@@ -20,16 +21,18 @@ export function Toggle({ checked, onChange, disabled }: { checked: boolean; onCh
       aria-checked={checked}
       disabled={disabled}
       onClick={() => onChange(!checked)}
+      className="fluent-toggle"
       style={{
-        width: 44, height: 26, borderRadius: 13, flexShrink: 0, position: "relative",
-        background: checked ? "var(--connected)" : "var(--surface-elevated)",
-        boxShadow: checked ? "none" : "inset 0 0 0 1px var(--separator)",
-        transition: "background 0.2s", opacity: disabled ? 0.45 : 1,
+        width: 40, height: 20, borderRadius: 10, flexShrink: 0, position: "relative",
+        background: checked ? "var(--accent)" : "transparent",
+        border: checked ? "1px solid var(--accent)" : "1px solid var(--text-secondary)",
+        transition: "background 0.15s, border-color 0.15s", opacity: disabled ? 0.4 : 1,
       }}
     >
-      <span style={{
-        position: "absolute", top: 2, left: checked ? 20 : 2, width: 22, height: 22, borderRadius: 11,
-        background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,0.25)", transition: "left 0.2s",
+      <span className="fluent-knob" style={{
+        position: "absolute", top: "50%", left: checked ? 23 : 4, width: 12, height: 12, borderRadius: 6,
+        transform: "translateY(-50%)",
+        background: checked ? "#fff" : "var(--text-secondary)", transition: "left 0.15s, width 0.15s, background 0.15s",
       }} />
     </button>
   );

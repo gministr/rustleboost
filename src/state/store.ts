@@ -83,6 +83,7 @@ function applyTheme(pref: ThemePref) {
 }
 
 let started = false;
+const launchedAt = Date.now();
 
 export const useApp = create<AppState>((set, get) => {
   const lang = () => get().settings.language;
@@ -104,7 +105,8 @@ export const useApp = create<AppState>((set, get) => {
       set({ status, uiStatus, connectedSince: since, ready: true, daemonDown: false });
       syncTray(uiStatus, status.server?.name);
     } catch {
-      if (get().ready) set({ daemonDown: true });
+      // Служба не ответила за 20 с после запуска — честно говорим об этом.
+      if (get().ready || Date.now() - launchedAt > 20_000) set({ daemonDown: true });
     }
   };
 

@@ -25,5 +25,8 @@ if [ "${1:-}" = "--install" ]; then
     [ -f "$out/wintun-arm64.dll" ] || { echo "нет $out/wintun-arm64.dll (официальный 0.14.1)" >&2; exit 1; }
     scp -q "$out/daemon-arm64.exe" rbvm:'C:/Windows/Temp/rb-daemon.exe'
     scp -q "$out/wintun-arm64.dll" rbvm:'C:/Windows/Temp/rb-wintun.dll'
-    ssh rbvm 'powershell -NoProfile -NonInteractive -File -' < "$root/scripts/vm-install-daemon.ps1"
+    # Скриптом-файлом: из стандартного ввода PowerShell читает как с клавиатуры.
+    tmp="$(mktemp)"; printf '\xef\xbb\xbf' > "$tmp"; cat "$root/scripts/vm-install-daemon.ps1" >> "$tmp"
+    scp -q "$tmp" rbvm:'C:/Windows/Temp/rb-install.ps1'; rm -f "$tmp"
+    ssh rbvm 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\Windows\Temp\rb-install.ps1'
 fi

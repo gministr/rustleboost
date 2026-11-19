@@ -282,6 +282,7 @@ func (m *Manager) Connect(serverID string) error {
 	m.mu.Unlock()
 
 	go m.guardConnection(session, selected, opts)
+	startConnectionDiag(session, m.sessionStale(session))
 	m.rememberServer(serverID, selected)
 
 	mode := "proxy"
@@ -291,6 +292,15 @@ func (m *Manager) Connect(serverID string) error {
 	log.Printf("Подключено к %s (%s/%s) через %s, режим %s, за %d мс",
 		selected.Name, selected.Protocol, selected.Transport, engine, mode, time.Since(started).Milliseconds())
 	return nil
+}
+
+// sessionStale — закончилось ли подключение с этим номером.
+func (m *Manager) sessionStale(session uint64) func() bool {
+	return func() bool {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return m.session != session || m.state != StateConnected
+	}
 }
 
 // rememberServer запоминает сервер для «подключиться к последнему».
@@ -311,6 +321,10 @@ func (m *Manager) connectVKTunnel(selected subscription.Server, opts config.Opti
 		if err := m.connectDirect(selected, selected.Engine, opts); err != nil {
 			return "", err
 		}
+		m.mu.RLock()
+		directSession := m.session
+		m.mu.RUnlock()
+		startConnectionDiag(directSession, m.sessionStale(directSession))
 		// Защита DNS (или Kill Switch) — как у пути Xray, со своими DNS
 		// прямого пути.
 		if err := enableTunFirewall(m.store.GetSettings().KillSwitch, directDNS); err != nil {

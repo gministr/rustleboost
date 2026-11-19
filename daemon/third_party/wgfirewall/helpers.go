@@ -98,8 +98,18 @@ func getCurrentProcessSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error)
 		sid = g.Sid
 		break
 	}
+	var trusteeType windows.TRUSTEE_TYPE = windows.TRUSTEE_IS_GROUP
 	if sid == nil {
-		return nil, wrapErr(windows.ERROR_NO_SUCH_GROUP)
+		// RustleBoost: служба запущена обычным процессом с правами
+		// администратора, а не службой Windows, и служебного SID (S-1-5-80-…)
+		// у неё нет. Тогда — пользователь процесса; привязка к самому файлу
+		// службы (ALE_APP_ID) остаётся первым условием фильтра.
+		user, err := processToken.GetTokenUser()
+		if err != nil {
+			return nil, wrapErr(err)
+		}
+		sid = user.User.Sid
+		trusteeType = windows.TRUSTEE_IS_USER
 	}
 
 	access := []windows.EXPLICIT_ACCESS{{
@@ -107,7 +117,7 @@ func getCurrentProcessSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error)
 		AccessMode:        windows.GRANT_ACCESS,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeType:  windows.TRUSTEE_IS_GROUP,
+			TrusteeType:  trusteeType,
 			TrusteeValue: windows.TrusteeValueFromSID(sid),
 		},
 	}}
