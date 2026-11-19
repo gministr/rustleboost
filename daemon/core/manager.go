@@ -8,8 +8,7 @@ import (
 	"github.com/google/uuid"
 	"log"
 	"net"
-	"net/http"
-	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"github.com/vpnclient/daemon/config"
 	"github.com/vpnclient/daemon/storage"
 	"github.com/vpnclient/daemon/subscription"
+	"rustleboost/rustlecore"
 )
 
 type ConnectionState string
@@ -50,8 +50,6 @@ type Manager struct {
 	mu            sync.RWMutex
 	dataDir       string
 	store         *storage.Store
-	singbox       *SingBoxRunner
-	xray          *XrayRunner
 	warp          WarpRunner
 	wdtt          WdttRunner
 	device        *DeviceClient
@@ -71,6 +69,10 @@ type Manager struct {
 	subCancel   context.CancelFunc
 	// direct — адаптер прямого пути, пока подключение идёт им (direct.go).
 	direct *directAdapter
+	// xraySession — подключение через ядро Xray (engine_xray.go).
+	xraySession *xraySession
+	// serverPins — адреса сервера Hysteria2, закреплённые за физическим шлюзом.
+	serverPins *pinner
 }
 
 func NewManager(dataDir string, store *storage.Store) *Manager {
@@ -78,8 +80,6 @@ func NewManager(dataDir string, store *storage.Store) *Manager {
 		dataDir: dataDir,
 		store:   store,
 		state:   StateDisconnected,
-		singbox: NewSingBoxRunner(dataDir),
-		xray:    NewXrayRunner(dataDir),
 		prober:  NewLatencyProber(dataDir),
 	}
 
@@ -156,7 +156,7 @@ func (m *Manager) GetStatus() Status {
 		if stats, ok := m.directStats(); ok {
 			status.Stats.Upload = stats.Upload
 			status.Stats.Download = stats.Download
-		} else if stats := m.singbox.GetStats(); stats != nil {
+		} else if stats, ok := adapterCounters(); ok {
 			status.Stats.Upload = stats.Upload
 			status.Stats.Download = stats.Download
 		}
@@ -218,131 +218,58 @@ func (m *Manager) Connect(serverID string) error {
 	m.lastWarning = ""
 	m.mu.Unlock()
 
-	// Аварийная блокировка прошлого подключения ещё держит адаптер: снять её,
-	// иначе второй адаптер с тем же идентификатором не создастся.
+	// Аварийная блокировка (Kill Switch) прошлого подключения ещё держит
+	// адаптер или брандмауэр: снять, иначе новое подключение не поднимется.
 	if lingering {
 		m.stopDirect(false)
 	}
+	disableTunFirewall()
 
 	settings := m.store.GetSettings()
 	opts := config.Options{
-		TUNMode:    settings.TUNMode,
-		RouteMode:  settings.RouteMode,
-		DNSMode:    settings.DNSMode,
-		AllowLAN:   settings.AllowLAN,
-		RouterMode: settings.RouterMode,
-		// Both read now, while the system resolver still works normally. Once
-		// the tunnel is up these names answer with placeholder addresses, and
-		// the adapter's own DNS entries would point back into the tunnel.
+		TUNMode:   settings.TUNMode,
+		RouteMode: settings.RouteMode,
+		DNSMode:   settings.DNSMode,
+		AllowLAN:  settings.AllowLAN,
+		// Адреса читаются сейчас, пока системный DNS работает как обычно.
 		ServerIPs: resolveHost(selected.Address),
 		SystemDNS: SystemDNSServers(),
 	}
-	resolvedEngine := config.ResolveEngine(selected, opts.RouterMode)
-	usesXray := resolvedEngine == subscription.EngineXray
-	// Kept for the watchdog, which restarts a dead Xray from the same config.
-	var xrayCfg *config.XrayConfig
+	started := time.Now()
 
-	// Серверы RustleBoost и WARP в режиме TUN — прямым путём, без sing-box,
-	// если он включён в настройках (бета). Любой сбой прямого пути — адаптер,
-	// маршруты, ядро на нём — и подключение идёт прежним путём.
-	if settings.TUNMode && settings.DirectPath &&
-		(resolvedEngine == subscription.EngineWdtt || resolvedEngine == subscription.EngineWarp) {
-		err := m.connectDirect(selected, resolvedEngine, opts)
-		if err == nil {
-			m.store.UpdateSettings(func(s *storage.Settings) {
-				s.LastServerID = serverID
-				s.LastServerKey = serverKey(selected)
-			})
+	var (
+		engine string
+		err    error
+	)
+	switch {
+	case selected.Engine == subscription.EngineWdtt || selected.Engine == subscription.EngineWarp:
+		engine, err = m.connectVKTunnel(selected, opts)
+	default:
+		engine, err = m.connectXray(selected, opts, settings.KillSwitch)
+	}
+	if err != nil {
+		return m.failConnect(err)
+	}
+	if selected.Engine == subscription.EngineWdtt || selected.Engine == subscription.EngineWarp {
+		if opts.TUNMode {
+			// Прямой путь сам проверил канал и перевёл трафик: состояние и
+			// сторож уже выставлены в connectDirect.
+			m.rememberServer(serverID, selected)
+			log.Printf("Подключено к %s за %d мс (%s)", selected.Name, time.Since(started).Milliseconds(), engine)
 			return nil
 		}
-		if !errors.Is(err, errDirectUnavailable) {
-			return err
-		}
-		log.Printf("[direct] %v — подключаюсь прежним путём через sing-box", err)
-		m.mu.Lock()
-		m.state = StateConnecting
-		m.current = &selected
-		m.mu.Unlock()
 	}
 
-	engine := "sing-box"
-	if resolvedEngine == subscription.EngineWdtt {
-		engine = "sing-box + wdtt"
-		if err := m.wdtt.Start(m.dataDir, selected, config.XraySocksPort, GetHWIDInfo().HWID, false, nil); err != nil {
-			return m.failConnect(fmt.Errorf("wdtt: %w", err))
-		}
-		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
-			return m.failConnect(fmt.Errorf("wdtt: порт %d не открылся: %w", config.XraySocksPort, err))
-		}
-	} else if resolvedEngine == subscription.EngineWarp {
-		engine = "sing-box + warp"
-		transport := m.transportServer()
-		if transport == nil {
-			return m.failConnect(fmt.Errorf("WARP: в каталоге нет WDTT-сервера — обновите подписку"))
-		}
-		if err := m.warp.Start(m.dataDir, *transport, config.XraySocksPort, GetHWIDInfo().HWID, false, nil); err != nil {
-			return m.failConnect(fmt.Errorf("warp: %w", err))
-		}
-		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
-			return m.failConnect(fmt.Errorf("warp: порт %d не открылся: %w", config.XraySocksPort, err))
-		}
-	} else if usesXray {
-		engine = "sing-box + xray"
-
-		generated, err := config.GenerateXray(selected, opts)
-		if err != nil {
-			return m.failConnect(fmt.Errorf("generate xray config: %w", err))
-		}
-		xrayCfg = generated
-		if err := m.xray.Start(xrayCfg); err != nil {
-			return m.failConnect(fmt.Errorf("xray: %w", err))
-		}
-		// sing-box forwards into Xray's SOCKS port; starting the tunnel
-		// before that port accepts would fail the first connections.
-		if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
-			m.stopChains()
-			return m.failConnect(fmt.Errorf("xray did not open port %d: %w\n%s",
-				config.XraySocksPort, err, m.xray.LogTail(6)))
-		}
-	}
-
-	sbCfg, err := config.Generate(selected, opts)
-	if err != nil {
-		m.stopChains()
-		return m.failConnect(fmt.Errorf("generate config: %w", err))
-	}
-	if err := m.singbox.Start(sbCfg); err != nil {
-		m.stopChains()
-		return m.failConnect(fmt.Errorf("sing-box: %w", err))
-	}
-
-	// In TUN mode the adapter already carries everything. Setting a system
-	// proxy on top adds a second, redundant path and misleads apps that
-	// honour it, so it belongs to proxy mode only.
-	if !settings.TUNMode {
-		SetSystemProxy(fmt.Sprintf("127.0.0.1:%d", config.MixedPort))
-	}
-
-	// Cores accept connections before the first handshake completes, so
-	// reporting "connected" the moment they start leaves the user staring at
-	// a green screen while nothing loads. Hold the state until real traffic
-	// makes it through.
+	// Ядро принимает соединения раньше, чем сервер ответил: «Подключено»
+	// показывается только после настоящего запроса через туннель.
 	tunnelWarning := ""
-	if err := waitForTunnelReady(tunnelReadyTimeout); err != nil {
-		log.Printf("[connect] tunnel not verified within %s: %v", tunnelReadyTimeout, err)
-		// This is the one symptom a user cannot self-diagnose: the app says
-		// connected, but nothing loads, and nothing in the UI explains why.
-		// The single most common cause on this app is a network that blocks
-		// one core's handshake but not the other's — so point straight at
-		// the setting that fixes it rather than a generic "check connection".
-		other := "Xray"
-		if resolvedEngine == subscription.EngineXray {
-			other = "sing-box"
-		}
-		tunnelWarning = fmt.Sprintf(
-			"Похоже, туннель не заработал через %s. Если сайты не открываются, "+
-				"попробуйте переключить режим ядра на «%s» или «Авто» в настройках.",
-			engineRussianName(resolvedEngine), other)
+	probeStarted := time.Now()
+	if livenessProbe(config.XraySocksPort, tunnelReadyTimeout) {
+		log.Printf("[connect] канал проверен за %d мс", time.Since(probeStarted).Milliseconds())
+	} else {
+		log.Printf("[connect] канал не ответил за %s\n%s", tunnelReadyTimeout, m.xrayLogTail(6))
+		tunnelWarning = "Похоже, сервер пока не отвечает. Если сайты не открываются, " +
+			"переподключитесь или выберите другой сервер."
 	}
 
 	m.mu.Lock()
@@ -354,125 +281,139 @@ func (m *Manager) Connect(serverID string) error {
 	session := m.session
 	m.mu.Unlock()
 
-	go m.guardConnection(session, resolvedEngine, xrayCfg, sbCfg, opts)
+	go m.guardConnection(session, selected, opts)
+	m.rememberServer(serverID, selected)
 
+	mode := "proxy"
+	if opts.TUNMode {
+		mode = "tun"
+	}
+	log.Printf("Подключено к %s (%s/%s) через %s, режим %s, за %d мс",
+		selected.Name, selected.Protocol, selected.Transport, engine, mode, time.Since(started).Milliseconds())
+	return nil
+}
+
+// rememberServer запоминает сервер для «подключиться к последнему».
+func (m *Manager) rememberServer(serverID string, selected subscription.Server) {
 	m.store.UpdateSettings(func(s *storage.Settings) {
 		s.LastServerID = serverID
 		s.LastServerKey = serverKey(selected)
 	})
-
-	mode := "proxy"
-	if settings.TUNMode {
-		mode = "tun"
-	}
-	log.Printf("Connected to %s (%s/%s) via %s, %s mode",
-		selected.Name, selected.Protocol, selected.Transport, engine, mode)
-	return nil
 }
 
-// guardConnection supervises a live connection: it restarts a core that died,
-// tests that the proxy leg really carries traffic, and ends the connection
-// honestly when neither helps.
+// connectVKTunnel — серверы RustleBoost (WDTT/SRTP) и WARP.
 //
-// session guards against a stale watchdog acting on a later connection: every
-// connect bumps the counter, so a watchdog whose session no longer matches
-// simply exits.
-func (m *Manager) guardConnection(session uint64, engine string, xrayCfg *config.XrayConfig, sbCfg *config.SingBoxConfig, opts config.Options) {
-	usesChain := engine == subscription.EngineXray ||
-		engine == subscription.EngineWarp || engine == subscription.EngineWdtt
+// В режиме TUN — прямой путь, как на iOS и Android: WireGuard ядра прямо на
+// адаптере Wintun (direct.go). В режиме прокси ядро держит SOCKS, а Xray даёт
+// системному прокси HTTP-вход поверх него.
+func (m *Manager) connectVKTunnel(selected subscription.Server, opts config.Options) (string, error) {
+	if opts.TUNMode {
+		if err := m.connectDirect(selected, selected.Engine, opts); err != nil {
+			return "", err
+		}
+		// Защита DNS (или Kill Switch) — как у пути Xray, со своими DNS
+		// прямого пути.
+		if err := enableTunFirewall(m.store.GetSettings().KillSwitch, directDNS); err != nil {
+			log.Printf("[firewall] защита DNS не включилась: %v", err)
+		}
+		m.mu.RLock()
+		engine := m.engine
+		m.mu.RUnlock()
+		return engine, nil
+	}
+	hwid := GetHWIDInfo().HWID
+	if selected.Engine == subscription.EngineWdtt {
+		if err := m.wdtt.Start(m.dataDir, selected, hysteriaSocksPort, hwid, false, nil); err != nil {
+			return "", fmt.Errorf("RustleBoost: %w", err)
+		}
+	} else {
+		transport := m.transportServer()
+		if transport == nil {
+			return "", fmt.Errorf("WARP: в каталоге нет сервера RustleBoost — обновите подписку")
+		}
+		if err := m.warp.Start(m.dataDir, *transport, hysteriaSocksPort, hwid, false, nil); err != nil {
+			return "", fmt.Errorf("WARP: %w", err)
+		}
+	}
+	if err := waitForPort(hysteriaSocksPort, 5*time.Second); err != nil {
+		m.stopChains()
+		return "", fmt.Errorf("ядро не открыло порт %d: %w", hysteriaSocksPort, err)
+	}
+	cfg, err := config.GenerateTunXray(config.TunXrayInput{
+		Server: selected, Opts: opts, UpstreamSocksPort: hysteriaSocksPort,
+		LogPath: filepath.Join(m.dataDir, xrayLogName),
+	})
+	if err != nil {
+		m.stopChains()
+		return "", err
+	}
+	if err := rustlecore.XrayStart(string(cfg)); err != nil {
+		m.stopChains()
+		return "", fmt.Errorf("ядро Xray: %s", humanizeXrayError(err))
+	}
+	m.mu.Lock()
+	m.xraySession = &xraySession{cfg: string(cfg)}
+	m.mu.Unlock()
+	SetSystemProxy(fmt.Sprintf("127.0.0.1:%d", config.MixedPort))
+	return engineRussianName(selected.Engine) + " · прокси", nil
+}
 
+// guardConnection — сторож подключения через Xray: перезапускает упавшее
+// ядро, проверяет канал настоящим запросом и честно завершает подключение,
+// если ничего не помогает. Прямой путь WDTT/WARP сторожит guardDirect.
+func (m *Manager) guardConnection(session uint64, selected subscription.Server, opts config.Options) {
 	stale := func() bool {
 		m.mu.RLock()
 		defer m.mu.RUnlock()
 		return m.session != session || m.state != StateConnected
 	}
-
 	hooks := guardHooks{
 		stale:        stale,
-		singboxAlive: m.singbox.IsRunning,
+		singboxAlive: m.xrayAlive,
 		restartSingbox: func() error {
 			if stale() {
 				return nil
 			}
-			if err := m.singbox.Start(sbCfg); err != nil {
+			if err := m.restartXray(); err != nil {
 				return err
 			}
-			// The connection ended while the core was starting: a core left
-			// running with nobody to stop it would hold the adapter forever.
 			if stale() {
-				m.singbox.Stop()
+				rustlecore.XrayStop()
 			}
 			return nil
 		},
+		probe:  func() bool { return livenessProbe(config.XraySocksPort, 9*time.Second) },
 		giveUp: func(reason string) { m.handleUnexpectedStop(session, opts, reason) },
 		logf:   log.Printf,
 		now:    time.Now,
 		sleep:  time.Sleep,
 	}
-	if usesChain {
-		hooks.chainAlive = m.chainRunning
-	}
-	// Only Xray is restarted and probed. WDTT and WARP rebuild their own
-	// sessions with the VK and Cloudflare, which a blind restart would only
-	// disturb; for them a dead core is reported, as before.
-	if engine == subscription.EngineXray && xrayCfg != nil {
-		hooks.restartChain = func() error {
-			if stale() {
-				return nil
-			}
-			m.xray.Stop()
-			if err := m.xray.Start(xrayCfg); err != nil {
-				return err
-			}
-			if err := waitForPort(config.XraySocksPort, 5*time.Second); err != nil {
-				return err
-			}
-			if stale() {
-				m.xray.Stop()
-			}
-			return nil
-		}
-		hooks.probe = func() bool { return livenessProbe(config.XraySocksPort, 9*time.Second) }
-	}
-
 	runGuard(defaultGuardTiming(), hooks)
 }
 
 func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options, reason string) {
-	killSwitch := m.store.GetSettings().KillSwitch
+	killSwitch := m.store.GetSettings().KillSwitch && opts.TUNMode
 
 	m.mu.RLock()
 	direct := m.direct != nil
 	m.mu.RUnlock()
-	// На прямом пути аварийная блокировка — сам адаптер: маршруты остаются в
-	// туннеле, ядра нет, и трафик программ никуда не уходит.
-	m.stopDirect(killSwitch && opts.TUNMode)
-	m.singbox.Stop()
+	// Почему ядро остановилось — в его журнале; следующий запуск его сотрёт.
+	if tail := m.coreLogTail(); tail != "" {
+		log.Printf("[watchdog] журнал ядра перед остановкой:\n%s", tail)
+	}
+	// Kill Switch: на прямом пути держит сам адаптер (маршруты в туннеле без
+	// ядра), на пути Xray — брандмауэр, который блокирует всё мимо туннеля.
+	m.stopDirect(killSwitch)
+	m.stopXray(killSwitch)
 	m.stopChains()
-	ClearSystemProxy()
 
 	message := "соединение с сервером прервано"
 	if reason != "" {
 		message += " (" + reason + ")"
 	}
-	// Why the core stopped is in its log, and the next start overwrites it.
-	if tail := m.coreLogTail(); tail != "" {
-		log.Printf("[watchdog] журнал ядер перед остановкой:\n%s", tail)
-	}
-
-	if killSwitch && opts.TUNMode && direct {
-		log.Println("[watchdog] kill switch: адаптер прямого пути держит трафик")
+	if killSwitch && (direct || tunFirewallHolds()) {
+		log.Println("[watchdog] kill switch: трафик заблокирован до «Отключить»")
 		message = "соединение прервано. Kill Switch блокирует трафик — нажмите «Отключить», чтобы вернуть обычный доступ"
-	} else if killSwitch && opts.TUNMode {
-		// Raise the blocking tunnel before reporting, so there is no window
-		// in which traffic could reach the network unprotected.
-		if err := m.singbox.Start(config.GenerateBlocking(opts)); err != nil {
-			log.Printf("[watchdog] kill switch failed to engage: %v", err)
-			message = "соединение прервано, и заблокировать трафик не удалось — отключитесь от сети вручную"
-		} else {
-			log.Println("[watchdog] kill switch engaged — traffic blocked")
-			message = "соединение прервано. Kill Switch блокирует трафик — нажмите «Отключить», чтобы вернуть обычный доступ"
-		}
 	}
 
 	m.mu.Lock()
@@ -486,25 +427,17 @@ func (m *Manager) handleUnexpectedStop(session uint64, opts config.Options, reas
 	m.mu.Unlock()
 }
 
-// coreLogTail collects the last lines of both cores' logs for the daemon log.
+// coreLogTail — последние строки журнала ядра для журнала службы.
 func (m *Manager) coreLogTail() string {
-	var parts []string
-	if t := strings.TrimSpace(m.singbox.LogTail(6)); t != "" {
-		parts = append(parts, "sing-box:\n"+t)
-	}
-	if t := strings.TrimSpace(m.xray.LogTail(6)); t != "" {
-		parts = append(parts, "xray:\n"+t)
-	}
-	return strings.Join(parts, "\n")
+	return strings.TrimSpace(m.xrayLogTail(8))
 }
 
 // failConnect rolls the manager back to a clean disconnected state and keeps
 // the reason so the UI can show it instead of a bare "connection failed".
 func (m *Manager) failConnect(err error) error {
 	m.stopDirect(false)
-	m.singbox.Stop()
+	m.stopXray(false)
 	m.stopChains()
-	ClearSystemProxy()
 
 	m.mu.Lock()
 	m.state = StateDisconnected
@@ -522,14 +455,13 @@ func (m *Manager) failConnect(err error) error {
 func (m *Manager) Disconnect() error {
 	m.mu.Lock()
 	if m.state == StateDisconnected {
-		// Соединение уже прервано, но аварийная блокировка (Kill Switch) могла
-		// остаться: адаптер прямого пути или блокирующий sing-box. «Отключить»
-		// обязано её снять, иначе интернет не вернётся до перезапуска.
+		// Соединение уже прервано, но Kill Switch мог остаться: адаптер
+		// прямого пути или брандмауэр. «Отключить» обязано его снять.
 		lingering := m.direct != nil
 		m.mu.Unlock()
-		if lingering || m.singbox.IsRunning() {
+		if lingering || tunFirewallHolds() {
 			m.stopDirect(false)
-			m.singbox.Stop()
+			m.stopXray(false)
 			log.Println("Kill switch released")
 		}
 		return nil
@@ -538,13 +470,8 @@ func (m *Manager) Disconnect() error {
 	m.mu.Unlock()
 
 	m.stopDirect(false)
-	if err := m.singbox.Stop(); err != nil {
-		log.Printf("Stop sing-box: %v", err)
-	}
-	if err := m.stopChains(); err != nil {
-		log.Printf("Stop xray: %v", err)
-	}
-	ClearSystemProxy()
+	m.stopXray(false)
+	m.stopChains()
 
 	m.mu.Lock()
 	m.state = StateDisconnected
@@ -870,46 +797,6 @@ func engineRussianName(engine string) string {
 // unreachable while the rest of the internet works fine.
 const tunnelReadyTimeout = 15 * time.Second
 
-// waitForTunnelReady polls through the local mixed inbound until a request
-// completes end to end — inbound, routing, proxy outbound, and the node
-// itself. That is the first moment the connection is genuinely usable.
-func waitForTunnelReady(timeout time.Duration) error {
-	proxy := fmt.Sprintf("127.0.0.1:%d", config.MixedPort)
-
-	proxyURL, err := url.Parse("http://" + proxy)
-	if err != nil {
-		return err
-	}
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:               http.ProxyURL(proxyURL),
-			DisableKeepAlives:   true,
-			TLSHandshakeTimeout: 5 * time.Second,
-		},
-		Timeout: 6 * time.Second,
-	}
-
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-
-	for time.Now().Before(deadline) {
-		start := time.Now()
-		resp, err := client.Get(probeURL)
-		if err == nil {
-			resp.Body.Close()
-			log.Printf("[connect] tunnel ready in %dms", time.Since(start).Milliseconds())
-			return nil
-		}
-		lastErr = err
-		time.Sleep(500 * time.Millisecond)
-	}
-
-	if lastErr == nil {
-		lastErr = fmt.Errorf("timeout")
-	}
-	return lastErr
-}
-
 // The adapter's network category used to be forced to Private here, by
 // running Set-NetConnectionProfile through PowerShell, so Windows would show
 // the connection as trusted. It only ever affected which firewall profile the
@@ -941,14 +828,14 @@ func (m *Manager) transportServer() *subscription.Server {
 
 // chainRunning — поднято ли ядро, которое проксирует трафик в sing-box.
 func (m *Manager) chainRunning() bool {
-	return m.xray.IsRunning() || m.warp.IsRunning() || m.wdtt.IsRunning()
+	return m.warp.IsRunning() || m.wdtt.IsRunning()
 }
 
 // stopChains снимает WARP и Xray: сторож и отключение работают с обоими.
 func (m *Manager) stopChains() error {
 	m.warp.Stop()
 	m.wdtt.Stop()
-	return m.xray.Stop()
+	return nil
 }
 
 // measurable — можно ли замерить задержку: WDTT и WARP устроены так, что

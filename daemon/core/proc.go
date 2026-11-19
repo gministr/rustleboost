@@ -233,3 +233,22 @@ func tailFile(path string, n int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// RemoveRetiredCores удаляет sing-box.exe и xray.exe, оставшиеся в папке
+// приложения от версий до 2.0: ядро теперь работает внутри службы. Вызывается
+// после CleanupStaleCores, когда старые процессы уже сняты.
+func RemoveRetiredCores() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(exe)
+	for _, name := range []string{"sing-box.exe", "xray.exe"} {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			if err := os.Remove(path); err == nil {
+				log.Printf("[cleanup] удалено ядро прежних версий: %s", name)
+			}
+		}
+	}
+}

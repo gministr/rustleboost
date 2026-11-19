@@ -16,7 +16,7 @@ import (
 // Version is stamped into the log on every start. Without it a log file sent
 // in for diagnosis cannot be tied to the build that produced it, which makes
 // it impossible to tell a fixed bug from a recurring one.
-const Version = "1.6.1"
+const Version = "2.0.0"
 
 func main() {
 	port := flag.String("port", "7777", "API server port")
@@ -40,12 +40,14 @@ func main() {
 
 	// A previous run may have been killed before it could stop its cores.
 	core.CleanupStaleCores(*dataDir)
+	core.RemoveRetiredCores()
 
 	store := storage.New(filepath.Join(*dataDir, "settings.json"))
 	if err := store.Load(); err != nil {
 		log.Printf("No existing settings, using defaults: %v", err)
 	}
 
+	core.AppVersion = Version
 	manager := core.NewManager(*dataDir, store)
 
 	settings := store.GetSettings()

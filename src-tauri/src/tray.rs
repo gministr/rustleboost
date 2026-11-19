@@ -13,7 +13,10 @@ pub fn setup_tray(app: &mut App) -> tauri::Result<()> {
 
     let icon = load_icon(app);
 
-    let mut builder = TrayIconBuilder::new()
+    // Имя "main": по нему интерфейс меняет значок — белая собака, а при
+    // подключении зелёная, как в строке меню на Mac (src/lib/tray.ts).
+    let mut builder = TrayIconBuilder::with_id("main")
+        .tooltip("RustleBoost")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
@@ -55,6 +58,6 @@ pub fn setup_tray(app: &mut App) -> tauri::Result<()> {
 
 fn load_icon(_app: &App) -> Option<Image<'static>> {
     // Embed the icon at compile time — no runtime path resolution needed.
-    let bytes: &'static [u8] = include_bytes!("../icons/128x128.png");
+    let bytes: &'static [u8] = include_bytes!("../icons/tray-idle.png");
     Image::from_bytes(bytes).ok()
 }

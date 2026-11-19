@@ -43,6 +43,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/ping-all", s.handlePingAll)
 	s.mux.HandleFunc("/api/settings", s.handleSettings)
 	s.mux.HandleFunc("/api/hwid", s.handleHWID)
+	s.mux.HandleFunc("/api/support/inbox", s.handleSupportInbox)
+	s.mux.HandleFunc("/api/support/tickets", s.handleSupportTickets)
+	s.mux.HandleFunc("/api/support/ticket", s.handleSupportTicket)
+	s.mux.HandleFunc("/api/support/notices", s.handleSupportNotices)
+	s.mux.HandleFunc("/api/version", s.handleVersion)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -233,13 +238,22 @@ func (s *Server) handleHWID(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// corsMiddleware пускает запросы окна приложения и программ без Origin
+// (оболочка Tauri ходит из Rust). Запрос из браузера с чужого сайта
+// отклоняется: иначе любая открытая страница могла бы незаметно отправить
+// службе «подключиться» или подменить подписку.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if strings.HasPrefix(origin, "tauri://") || strings.HasPrefix(origin, "https://tauri.localhost") || origin == "" {
+		if origin != "" && !appOrigin(origin) {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Vary", "Origin")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -247,4 +261,16 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// appOrigin — окно приложения: tauri.localhost (Windows), tauri:// и сервер
+// разработки Vite.
+func appOrigin(origin string) bool {
+	switch {
+	case strings.HasPrefix(origin, "tauri://"),
+		origin == "http://tauri.localhost", origin == "https://tauri.localhost",
+		origin == "http://localhost:1420":
+		return true
+	}
+	return false
 }

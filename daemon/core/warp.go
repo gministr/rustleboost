@@ -17,7 +17,7 @@ import (
 	"sync"
 
 	"github.com/vpnclient/daemon/subscription"
-	"github.com/vpnclient/daemon/third_party/warpcore"
+	"rustleboost/rustlecore"
 )
 
 const (
@@ -51,7 +51,7 @@ func (r *WarpRunner) Start(dataDir string, transport subscription.Server, socksP
 	if err != nil {
 		return err
 	}
-	if err := warpcore.WarpStart(cfg); err != nil {
+	if err := rustlecore.WarpStart(cfg); err != nil {
 		return err
 	}
 	r.running = true
@@ -62,16 +62,16 @@ func (r *WarpRunner) Start(dataDir string, transport subscription.Server, socksP
 func (r *WarpRunner) Stop() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.running && !warpcore.WarpIsRunning() {
+	if !r.running && !rustlecore.WarpIsRunning() {
 		return
 	}
-	warpcore.WarpStop()
+	rustlecore.WarpStop()
 	r.running = false
 }
 
 // IsRunning — поднят ли WARP. Сторож опрашивает его, как Xray.
 func (r *WarpRunner) IsRunning() bool {
-	return warpcore.WarpIsRunning()
+	return rustlecore.WarpIsRunning()
 }
 
 // warpConfigJSON собирает конфигурацию для ядра: WARP и вложенный WDTT.
@@ -172,7 +172,7 @@ func srtpDeviceKey(dataDir string) (string, error) {
 			return key, nil
 		}
 	}
-	key := warpcore.SRTPGenerateDeviceKey()
+	key := rustlecore.SRTPGenerateDeviceKey()
 	if key == "" {
 		return "", fmt.Errorf("не удалось создать ключ")
 	}

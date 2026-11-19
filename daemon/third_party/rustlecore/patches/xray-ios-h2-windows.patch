@@ -1,0 +1,51 @@
+diff --git a/transport/internet/splithttp/dialer.go b/transport/internet/splithttp/dialer.go
+index 817d935..48567bf 100644
+--- a/transport/internet/splithttp/dialer.go
++++ b/transport/internet/splithttp/dialer.go
+@@ -281,13 +281,13 @@ func createHTTPClient(dest net.Destination, streamSettings *internet.MemoryStrea
+ 		if keepAlivePeriod < 0 {
+ 			keepAlivePeriod = 0
+ 		}
+-		transport = &http2.Transport{
+-			DialTLSContext: func(ctxInner context.Context, network string, addr string, cfg *gotls.Config) (net.Conn, error) {
+-				return dialContext(ctxInner)
+-			},
+-			IdleConnTimeout: net.ConnIdleTimeout,
+-			ReadIdleTimeout: keepAlivePeriod,
++		h2Transport := newH2Transport()
++		h2Transport.DialTLSContext = func(ctxInner context.Context, network string, addr string, cfg *gotls.Config) (net.Conn, error) {
++			return dialContext(ctxInner)
+ 		}
++		h2Transport.IdleConnTimeout = net.ConnIdleTimeout
++		h2Transport.ReadIdleTimeout = keepAlivePeriod
++		transport = h2Transport
+ 	} else {
+ 		httpDialContext := func(ctxInner context.Context, network string, addr string) (net.Conn, error) {
+ 			return dialContext(ctxInner)
+@@ -603,3 +603,26 @@ func (w uploadWriter) Write(b []byte) (int, error) {
+ 	}
+ 	return writed, nil
+ }
++
++// newH2Transport — RustleBoost: на iOS окна приёма HTTP/2 ограничены.
++//
++// По умолчанию клиент объявляет 4 МБ на поток и 1 ГБ на соединение, и всё,
++// что сеть успела принести раньше, чем мост забрал, лежит в куче Go. У
++// расширения туннеля лимит 50 МБ на всё: на загрузке через XHTTP куча за пять
++// секунд вырастала с 8 до 50 МБ, и система снимала процесс. Живыми данными
++// занято — потолок памяти Go здесь не помогает, остановить поток может только
++// окно. 512 КБ на поток при задержке 60 мс — это ~70 Мбит/с на загрузку.
++func newH2Transport() *http2.Transport {
++	if runtime.GOOS != "ios" {
++		return &http2.Transport{}
++	}
++	t1 := &http.Transport{HTTP2: &http.HTTP2Config{
++		MaxReceiveBufferPerConnection: 4 << 20,
++		MaxReceiveBufferPerStream:     512 << 10,
++	}}
++	h2, err := http2.ConfigureTransports(t1)
++	if err != nil {
++		return &http2.Transport{}
++	}
++	return h2
++}

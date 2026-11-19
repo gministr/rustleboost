@@ -42,6 +42,12 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # Ядро — то же rustlecore, что у iOS/Android/Mac (daemon/third_party),
+      # Xray-core той же версии с правками (scripts/fetch-xray.sh).
+      - name: Prepare Xray sources
+        shell: bash
+        run: scripts/fetch-xray.sh
+
       - name: Test daemon
         working-directory: daemon
         run: go test ./...
@@ -63,22 +69,12 @@ jobs:
           GOARCH: amd64
         run: go build -ldflags "-s -w -H windowsgui" -o ../src-tauri/binaries/daemon-x86_64-pc-windows-msvc.exe .
 
-      - name: Verify bundled cores
+      - name: Verify Wintun
         shell: bash
         run: |
-          # The installer ships these; a missing core means an app that
-          # launches but can never connect.
-          for core in sing-box xray; do
-            path="src-tauri/binaries/$core-x86_64-pc-windows-msvc.exe"
-            if [ ! -f "$path" ]; then
-              echo "::error::missing core binary $path"
-              exit 1
-            fi
-          done
-          # Wintun: адаптер прямого пути для серверов RustleBoost и WARP.
-          # Без него демон откатывается на sing-box, и прямой путь молча
-          # пропадает, поэтому файл сверяется с официальным выпуском 0.14.1
-          # (архив wintun.net, сумма 07c25618…ef51; ниже — сумма самой DLL).
+          # Wintun — адаптер туннеля (держат его Xray и прямой путь WDTT/WARP).
+          # Сверяется с официальным выпуском 0.14.1 (архив wintun.net, сумма
+          # 07c25618…ef51; ниже — сумма самой DLL для x64).
           actual=$(sha256sum src-tauri/binaries/wintun.dll | cut -d' ' -f1)
           if [ "$actual" != "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce" ]; then
             echo "::error::wintun.dll missing or not the official 0.14.1 build ($actual)"
@@ -96,7 +92,7 @@ jobs:
         with:
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
           releaseName: RustleBoost ${{ github.event.inputs.tag || github.ref_name }}
-          releaseBody: "Исправлены ошибки подключения: серверы больше не пропадают из списка с ошибкой «server not found», группы серверов сами выбирают работающий канал. Версия в настройках показывается правильно. Просьба обновиться: старые версии приложения могут работать некорректно."
+          releaseBody: "RustleBoost 2.0 для Windows: новое ядро — то же, что в приложениях для iPhone, Android и Mac. Подключение быстрее и стабильнее, все серверы работают так же, как на телефоне. Новый дизайн как на Mac, поддержка прямо в приложении. Просьба обновиться: старые версии приложения могут работать некорректно."
           releaseDraft: false
           # Тег с дефисом (v1.6.0-beta.1) — предварительный выпуск: его ставят
           # вручную по ссылке, а встроенное обновление его не видит

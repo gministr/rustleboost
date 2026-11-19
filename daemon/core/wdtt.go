@@ -11,7 +11,7 @@ import (
 	"sync"
 
 	"github.com/vpnclient/daemon/subscription"
-	"github.com/vpnclient/daemon/third_party/warpcore"
+	"rustleboost/rustlecore"
 )
 
 // WdttRunner держит запущенный WDTT. Один на демон: SOCKS один.
@@ -44,7 +44,7 @@ func (r *WdttRunner) Start(dataDir string, server subscription.Server, socksPort
 	if err != nil {
 		return err
 	}
-	if err := warpcore.VKTurnStart(string(data)); err != nil {
+	if err := rustlecore.VKTurnStart(string(data)); err != nil {
 		return err
 	}
 	r.running = true
@@ -55,14 +55,14 @@ func (r *WdttRunner) Start(dataDir string, server subscription.Server, socksPort
 func (r *WdttRunner) Stop() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.running && !warpcore.VKTurnIsRunning() {
+	if !r.running && !rustlecore.VKTurnIsRunning() {
 		return
 	}
-	warpcore.VKTurnStop()
+	rustlecore.VKTurnStop()
 	r.running = false
 }
 
 // IsRunning — поднят ли WDTT. Сторож опрашивает его, как Xray.
 func (r *WdttRunner) IsRunning() bool {
-	return warpcore.VKTurnIsRunning()
+	return rustlecore.VKTurnIsRunning()
 }

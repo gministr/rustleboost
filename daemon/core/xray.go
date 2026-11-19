@@ -3,52 +3,59 @@ package core
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
+
+	"github.com/xtls/xray-core/core"
 
 	"github.com/vpnclient/daemon/config"
+	// Регистрирует протоколы и транспорты Xray (rustlecore делает то же).
+	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
-// XrayRunner owns the Xray-core process.
+// TrafficStats — счётчики трафика подключения.
+type TrafficStats struct {
+	Upload   int64
+	Download int64
+}
+
+// XrayRunner — отдельный экземпляр Xray для замера задержки серверов.
 //
-// Xray exists in this client for one reason: transports sing-box does not
-// implement. XHTTP in particular is an Xray-only transport, and it is what the
-// LTE-facing nodes use — without this core those locations cannot connect at
-// all. Xray carries only the proxy leg; TUN, DNS and routing stay in sing-box,
-// which reaches Xray over a local SOCKS inbound.
+// Раньше для этого запускался второй xray.exe с конфигурацией на диске (а в
+// ней учётные данные серверов). Теперь экземпляр живёт в процессе службы и
+// получает конфигурацию из памяти. Основное ядро подключения — rustlecore.
 type XrayRunner struct {
-	proc *procRunner
+	mu   sync.Mutex
+	inst *core.Instance
 }
 
-func NewXrayRunner(dataDir string) *XrayRunner {
-	return &XrayRunner{proc: newProcRunner("xray", dataDir)}
-}
-
-// NewXrayProbeRunner returns a second Xray used only for latency measurement.
-// It writes its own config, log and pid files so a probe never disturbs the
-// instance carrying the user's traffic.
-func NewXrayProbeRunner(dataDir string) *XrayRunner {
-	return &XrayRunner{proc: newProcRunnerNamed("xray", "xray-probe", dataDir)}
-}
+// NewXrayProbeRunner — экземпляр для замеров.
+func NewXrayProbeRunner(string) *XrayRunner { return &XrayRunner{} }
 
 func (r *XrayRunner) StartProbe(cfg *config.XrayConfig) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal probe config: %w", err)
 	}
-	return r.proc.start(data, "xray-probe-config.json", "run")
-}
-
-func (r *XrayRunner) Start(cfg *config.XrayConfig) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal xray config: %w", err)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inst != nil {
+		_ = r.inst.Close()
+		r.inst = nil
 	}
-	return r.proc.start(data, "xray-config.json", "run")
-}
-
-func (r *XrayRunner) Stop() error {
-	r.proc.stop()
+	inst, err := core.StartInstance("json", data)
+	if err != nil {
+		return err
+	}
+	r.inst = inst
 	return nil
 }
 
-func (r *XrayRunner) IsRunning() bool        { return r.proc.isRunning() }
-func (r *XrayRunner) LogTail(n int) string   { return r.proc.logTail(n) }
+func (r *XrayRunner) Stop() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.inst != nil {
+		_ = r.inst.Close()
+		r.inst = nil
+	}
+	return nil
+}

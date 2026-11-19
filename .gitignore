@@ -6,3 +6,8 @@ src-tauri/gen/
 *.key
 *.key.pub
 daemon/daemon.exe
+
+# Исходники Xray-core: scripts/fetch-xray.sh
+daemon/third_party/xray-core/
+.DS_Store
+build/

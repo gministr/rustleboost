@@ -24,9 +24,11 @@ import (
 const (
 	deviceAPIBase    = "https://auth.lindavpn.com"
 	devicePlatform   = "windows"
-	deviceAppVersion = "1.6.1"
 	heartbeatEvery   = time.Minute
 )
+
+// AppVersion — версия приложения для админки; выставляет main из общей версии.
+var AppVersion = "dev"
 
 type deviceState struct {
 	DeviceID string `json:"deviceId"`
@@ -106,7 +108,7 @@ func (d *DeviceClient) Register(ctx context.Context, subscriptions []string) err
 		"platform":      devicePlatform,
 		"model":         d.hwid.Model,
 		"osVersion":     d.hwid.OSVer,
-		"appVersion":    deviceAppVersion,
+		"appVersion":    AppVersion,
 		"subscriptions": subscriptions,
 	}, &answer, false)
 	if err != nil {
@@ -122,7 +124,7 @@ func (d *DeviceClient) Register(ctx context.Context, subscriptions []string) err
 // UpdateSubscriptions сообщает серверу актуальный набор ключей подписок.
 func (d *DeviceClient) UpdateSubscriptions(ctx context.Context, subscriptions []string) error {
 	return d.post(ctx, "/v1/device/update", map[string]any{
-		"appVersion":    deviceAppVersion,
+		"appVersion":    AppVersion,
 		"subscriptions": subscriptions,
 	}, nil, true)
 }

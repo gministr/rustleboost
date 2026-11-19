@@ -1,0 +1,81 @@
+name: Test build
+
+# Проверочная сборка: установщик как файл сборки (Artifacts), без выпуска и
+# без latest.json — у пользователей ничего не меняется. Запуск вручную или
+# пушем в ветку rebuild/*.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "rebuild/**"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache-dependency-path: daemon/go.sum
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Prepare Xray sources
+        shell: bash
+        run: scripts/fetch-xray.sh
+
+      - name: Test daemon
+        working-directory: daemon
+        run: go test ./...
+
+      - name: Generate daemon version resource
+        working-directory: daemon
+        run: |
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          goversioninfo -o resource_windows_amd64.syso versioninfo.json
+
+      - name: Build daemon
+        working-directory: daemon
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -ldflags "-s -w -H windowsgui" -o ../src-tauri/binaries/daemon-x86_64-pc-windows-msvc.exe .
+
+      - name: Build daemon (ARM64, for Windows on ARM)
+        working-directory: daemon
+        env:
+          GOOS: windows
+          GOARCH: arm64
+        run: go build -ldflags "-s -w -H windowsgui" -o ../build-arm64/daemon.exe .
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RustleBoost-windows-test
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            build-arm64/daemon.exe
+          retention-days: 14

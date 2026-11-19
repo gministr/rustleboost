@@ -1,11 +1,40 @@
 # RustleBoost — Инструкция по сборке
 
-## Архитектура
-
-Клиент состоит из четырёх частей:
+## Архитектура (2.0)
 
 | Слой | Технология | Роль |
 |---|---|---|
+| UI | React + TypeScript (Vite) | Интерфейс — как приложение на Mac |
+| Оболочка | Tauri 2 (Rust) | Окно, трей, автозапуск, автообновление |
+| Служба | Go (`daemon/`) | Подписка, админка, поддержка, ядро туннеля |
+| Ядро | rustlecore (`daemon/third_party`) | То же, что у iOS/Android/Mac: Xray, Hysteria2, WDTT/SRTP, WARP |
+
+Одно ядро в процессе службы — без sing-box и xray.exe:
+
+```
+обычные серверы:     приложения → Wintun (встроенный TUN Xray) → Xray → сервер
+RustleBoost и WARP:  приложения → Wintun → WireGuard ядра (прямой путь) → релеи ВК
+```
+
+Конфигурация Xray — та же, что на iOS (`daemon/config/xraytun.go`, эталон —
+`RustleBoostKit/Config/XrayConfigBuilder.swift`). Исходящие соединения ядра
+привязаны к физической сети (`autoOutboundsInterface`), DNS мимо туннеля
+закрыт брандмауэром Windows (`daemon/third_party/wgfirewall`, из клиента
+WireGuard, MIT).
+
+Подготовка исходников:
+
+```
+scripts/sync-core.sh    # перенести rustlecore из ~/Developer/RustleBoost (если правили ядро)
+scripts/fetch-xray.sh   # исходники Xray-core нужной версии + правки (daemon/patches/xray)
+python3 scripts/make-ui-assets.py   # картинки интерфейса из ресурсов iOS/Mac
+```
+
+Проверочная служба для виртуальной машины (ARM64) и подмена в установленном
+приложении: `scripts/build-test-daemon.sh --install`. Установщик для проверки
+собирает `.github/workflows/build.yml` (файл сборки, без выпуска).
+
+---|---|---|
 | UI | React + TypeScript (Vite) | Интерфейс |
 | Оболочка | Tauri 2 (Rust) | Окно, трей, автозапуск, автообновление |
 | Демон | Go | REST API на localhost, подписка, управление ядрами |

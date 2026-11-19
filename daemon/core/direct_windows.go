@@ -12,16 +12,16 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/windows/tunnel/winipcfg"
 
-	"github.com/vpnclient/daemon/third_party/warpcore"
+	"rustleboost/rustlecore"
 )
 
 // setCoreDevice передаёт ядру интерфейс прямого пути (nil — снять).
 func setCoreDevice(dev tun.Device) {
 	if dev == nil {
-		warpcore.SetTunDevice(nil)
+		rustlecore.SetTunDevice(nil)
 		return
 	}
-	warpcore.SetTunDevice(dev)
+	rustlecore.SetTunDevice(dev)
 }
 
 // Адаптер прямого пути на Windows: Wintun, как у официального клиента
