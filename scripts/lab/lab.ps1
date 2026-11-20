@@ -155,7 +155,7 @@ function Get-NetSnapshot([string] $Tag) {
     $lines += (& netsh.exe interface ipv4 show ipstats 2>&1)
     $lines += (& netsh.exe interface ipv4 show tcpstats 2>&1)
     $lines += (& netsh.exe interface ipv4 show udpstats 2>&1)
-    $lines | Set-Content -Path $file -Encoding utf8
+    [IO.File]::WriteAllText($file, (($lines | ForEach-Object { "$_" }) -join "`r`n"), [Text.UTF8Encoding]::new($false))
 }
 
 function Test-Online([string] $Tag, [string] $Baseline) {
