@@ -14,6 +14,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/vpnclient/daemon/subscription"
@@ -193,10 +194,10 @@ func GenerateTunXray(in TunXrayInput) ([]byte, error) {
 		}}
 	}
 
-	// Проверочная версия: подробный журнал (соединения с адаптера и их
-	// маршрут) — пока ищем, где рвётся трафик в Windows. Перед выпуском
-	// вернуть "warning".
-	logSection := map[string]any{"loglevel": "info"}
+	// Только предупреждения и ошибки: подробный журнал пишет каждое
+	// соединение, а на компьютере их тысячи. На стенде (RUSTLEBOOST_DIAG=1)
+	// — подробно.
+	logSection := map[string]any{"loglevel": xrayLogLevel()}
 	if in.LogPath != "" {
 		logSection["error"] = in.LogPath
 		logSection["access"] = "none"
@@ -228,6 +229,14 @@ func GenerateTunXray(in TunXrayInput) ([]byte, error) {
 		}
 	}
 	return json.Marshal(cfg)
+}
+
+// xrayLogLevel — подробность журнала ядра: подробно только на стенде.
+func xrayLogLevel() string {
+	if os.Getenv("RUSTLEBOOST_DIAG") == "1" {
+		return "info"
+	}
+	return "warning"
 }
 
 // TunDNSAddrs — DNS туннеля в виде строк для брандмауэра.

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -27,7 +28,16 @@ import (
 	"github.com/vpnclient/daemon/config"
 )
 
+// diagEnabled — самодиагностика только на стенде (scripts/lab/lab.ps1 ставит
+// RUSTLEBOOST_DIAG=1): она запускает ping, netsh и PowerShell, а скрытый
+// процесс, запускающий PowerShell, антивирусы считают подозрительным. У
+// пользователей служба такого не делает.
+var diagEnabled = os.Getenv("RUSTLEBOOST_DIAG") == "1"
+
 func startConnectionDiag(session uint64, stale func() bool) {
+	if !diagEnabled {
+		return
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {

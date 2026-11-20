@@ -29,6 +29,8 @@ $Bin = (Resolve-Path $Bin).Path
 
 $script:results = [System.Collections.Generic.List[object]]::new()
 $script:daemon = $null
+$script:started = Get-Date
+$script:system = $null
 
 function Say([string] $text) { Write-Host $text }
 
@@ -84,6 +86,8 @@ function Invoke-Daemon([string] $Method, [string] $Path, $Body = $null, [int] $T
 }
 
 function Start-Daemon {
+    # Самодиагностика службы (core/diag_windows.go) — только на стенде.
+    $env:RUSTLEBOOST_DIAG = "1"
     $script:daemon = Start-Process -FilePath (Join-Path $Bin "daemon.exe") -ArgumentList @("-data", $Data) -PassThru -WindowStyle Hidden
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Milliseconds 500
@@ -186,16 +190,38 @@ function Summary($checks) {
     return ($marks -join ", ")
 }
 
+# Отчёт сдаётся после каждого сервера: если задание оборвётся по сроку,
+# сделанное не пропадёт.
+function Send-Report([switch] $WithLogs) {
+    $report = [ordered]@{
+        system = $script:system
+        started = $script:started.ToString("o")
+        seconds = [int]((Get-Date) - $script:started).TotalSeconds
+        results = $script:results
+    }
+    $json = $report | ConvertTo-Json -Depth 8
+    Send-LabBytes "result-$Arch.json" ([Text.Encoding]::UTF8.GetBytes($json))
+    if ($WithLogs) {
+        Send-LabFile "daemon-$Arch.log" (Join-Path $Data "daemon.log")
+        Send-LabFile "xray-$Arch.log" (Join-Path $Data "xray-core.log")
+        $nets = Get-ChildItem -Path $Out -Filter "net-*.txt" -ErrorAction SilentlyContinue | Sort-Object Name
+        if ($nets) {
+            $all = ($nets | ForEach-Object { "##### $($_.Name)`n" + (Get-Content $_.FullName -Raw) }) -join "`n"
+            [IO.File]::WriteAllText((Join-Path $Work "net-all.txt"), $all, [Text.UTF8Encoding]::new($false))
+            Send-LabFile "net-$Arch.txt" (Join-Path $Work "net-all.txt")
+        }
+    }
+}
+
 # ── прогон ────────────────────────────────────────────────────────────────
 
-$started = Get-Date
-$system = [ordered]@{
+$script:system = [ordered]@{
     arch = $Arch
     os = (Get-CimInstance Win32_OperatingSystem | Select-Object -ExpandProperty Caption)
     build = [Environment]::OSVersion.Version.ToString()
     firewall = (Get-NetFirewallProfile -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Enabled)" }) -join ","
 }
-Say "Стенд: $($system.os) $($system.build) ($Arch), брандмауэр: $($system.firewall)"
+Say "Стенд: $($script:system.os) $($script:system.build) ($Arch), брандмауэр: $($script:system.firewall)"
 
 try {
     $baseline = Get-ExitIP
@@ -228,7 +254,7 @@ try {
         $label = "[$n/$($plan.Count)] $group · $($server.name) ($($server.protocol)/$($server.transport))"
         $tag = "{0:d2}-{1}" -f $n, $group
         $entry = [ordered]@{ n = $n; group = $group; name = $server.name; protocol = $server.protocol; transport = $server.transport; security = $server.security; engine = $server.engine }
-        $connect = Measure-Step { Invoke-Daemon POST "/connect" @{ server_id = $server.id } 120 }
+        $connect = Measure-Step { Invoke-Daemon POST "/connect" @{ server_id = $server.id } 75 }
         $status = $null
         try { $status = Invoke-Daemon GET "/status" } catch { }
         $entry.connectMs = $connect.ms
@@ -269,6 +295,8 @@ try {
             Start-Sleep -Seconds 5
         }
         $script:results.Add([pscustomobject]$entry)
+        # Сеть уже без VPN — сдаём, что есть (журналы — каждый пятый сервер).
+        Send-Report -WithLogs:($n % 5 -eq 0)
     }
 } catch {
     Say "Стенд прерван: $($_.Exception.Message)"
@@ -279,21 +307,7 @@ try {
     if ($script:daemon) { try { Stop-Process -Id $script:daemon.Id -Force -ErrorAction SilentlyContinue } catch { } }
     Start-Sleep -Seconds 1
 
-    $report = [ordered]@{
-        system = $system
-        started = $started.ToString("o")
-        seconds = [int]((Get-Date) - $started).TotalSeconds
-        results = $script:results
-    }
-    $json = $report | ConvertTo-Json -Depth 8
-    Send-LabBytes "result-$Arch.json" ([Text.Encoding]::UTF8.GetBytes($json))
-    Send-LabFile "daemon-$Arch.log" (Join-Path $Data "daemon.log")
-    Send-LabFile "xray-$Arch.log" (Join-Path $Data "xray-core.log")
-    $nets = Get-ChildItem -Path $Out -Filter "net-*.txt" -ErrorAction SilentlyContinue | Sort-Object Name
-    if ($nets) {
-        $all = ($nets | ForEach-Object { "##### $($_.Name)`n" + (Get-Content $_.FullName -Raw) }) -join "`n"
-        Send-LabBytes "net-$Arch.txt" ([Text.Encoding]::UTF8.GetBytes($all))
-    }
+    Send-Report -WithLogs
     $pass = @($script:results | Where-Object { $_.ok }).Count
     $total = @($script:results | Where-Object { $null -ne $_.n }).Count
     Say "Итог: $pass из $total"

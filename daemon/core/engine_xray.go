@@ -76,12 +76,10 @@ func (m *Manager) connectXray(selected subscription.Server, opts config.Options,
 
 	session := &xraySession{cfg: string(cfgJSON), hysteria: upstream > 0, tun: opts.TUNMode}
 	if opts.TUNMode {
-		// Проверочная версия: защита DNS выключена, пока ищем, почему трафик
-		// программ не проходит через адаптер (вернуть перед выпуском).
-		if err := enableTunFirewallIf(killSwitch, xrayTunDNS()); err != nil {
-			// Без защиты DNS туннель работает, но провайдер может подменять
-			// адреса заблокированных сайтов — пишем, но не роняем подключение.
-			log.Printf("[firewall] защита DNS не включилась: %v", err)
+		if err := enableKillSwitchFirewall(killSwitch, xrayTunDNS()); err != nil {
+			// Туннель работает и без блокировки — пишем, но не роняем
+			// подключение.
+			log.Printf("[firewall] Kill Switch не включился: %v", err)
 		}
 	} else {
 		SetSystemProxy(fmt.Sprintf("127.0.0.1:%d", config.MixedPort))
@@ -216,10 +214,18 @@ func xrayTunDNS() []netip.Addr {
 	return out
 }
 
-// enableTunFirewallIf — проверочная версия: только Kill Switch, без защиты DNS.
-func enableTunFirewallIf(killSwitch bool, dns []netip.Addr) error {
+// enableKillSwitchFirewall — правила брандмауэра только для Kill Switch.
+//
+// Отдельной «защиты DNS» (запрет порта 53 мимо туннеля) в обычном режиме
+// нет — так проверено на настоящей Windows (стенд, scripts/lab): запрет
+// закрывает и службу DNS самой Windows, через которую ядро находит адреса
+// серверов и релеев ВК, когда переподключается, — и переподключение
+// упиралось бы в недоступный DNS. Подмена ответов провайдером на обычных
+// серверах не страшна: Xray определяет сайт по самому соединению (sniffing)
+// и открывает его по имени на стороне сервера.
+func enableKillSwitchFirewall(killSwitch bool, dns []netip.Addr) error {
 	if !killSwitch {
 		return nil
 	}
-	return enableTunFirewall(killSwitch, dns)
+	return enableTunFirewall(true, dns)
 }

@@ -325,10 +325,9 @@ func (m *Manager) connectVKTunnel(selected subscription.Server, opts config.Opti
 		directSession := m.session
 		m.mu.RUnlock()
 		startConnectionDiag(directSession, m.sessionStale(directSession))
-		// Защита DNS (или Kill Switch) — как у пути Xray, со своими DNS
-		// прямого пути.
-		if err := enableTunFirewallIf(m.store.GetSettings().KillSwitch, directDNS); err != nil {
-			log.Printf("[firewall] защита DNS не включилась: %v", err)
+		// Kill Switch — как у пути Xray, со своими DNS прямого пути.
+		if err := enableKillSwitchFirewall(m.store.GetSettings().KillSwitch, directDNS); err != nil {
+			log.Printf("[firewall] Kill Switch не включился: %v", err)
 		}
 		m.mu.RLock()
 		engine := m.engine
