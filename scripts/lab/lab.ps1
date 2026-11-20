@@ -208,15 +208,17 @@ try {
     $subscription = (Invoke-RestMethod -Uri "$Lab/subscription" -Headers @{ Authorization = "Bearer $(Get-LabToken)" } -TimeoutSec 30).subscription
     Write-Host "::add-mask::$subscription"
     $r = Invoke-Daemon POST "/subscription" @{ url = $subscription } 90
-    $servers = @(Invoke-Daemon GET "/servers")
+    # Invoke-RestMethod отдаёт массив JSON одним объектом — разворачиваем.
+    $servers = @(Invoke-Daemon GET "/servers" | ForEach-Object { $_ })
     $groups = $servers | Group-Object { if ($_.group) { $_.group } else { "regular" } }
     Say ("Подписка: " + (($groups | ForEach-Object { "$($_.Name) $($_.Count)" }) -join ", "))
 
     $order = @("regular", "rustleboost", "warp")
-    $plan = foreach ($g in $order) {
+    $plan = [System.Collections.Generic.List[object]]::new()
+    foreach ($g in $order) {
         $list = @($servers | Where-Object { ($(if ($_.group) { $_.group } else { "regular" })) -eq $g })
-        if ($PerGroup -gt 0) { $list = $list | Select-Object -First $PerGroup }
-        $list
+        if ($PerGroup -gt 0) { $list = @($list | Select-Object -First $PerGroup) }
+        foreach ($item in $list) { $plan.Add($item) }
     }
 
     $n = 0
