@@ -1,0 +1,75 @@
+name: Windows lab
+
+# Стенд: настоящая Windows в облаке GitHub поднимает службу так же, как
+# приложение, подключается к серверам всех трёх вкладок (обычные, RustleBoost —
+# старые и новые, WARP) и проверяет, что программы на компьютере правда ходят
+# в интернет через туннель. Проверяет машина GitHub, а не компьютер владельца.
+#
+# Секретов в открытом репозитории нет: ссылку подписки тестового пользователя
+# и приём журналов даёт наш сервер (auth.lindavpn.com, server/ci_lab.go) по
+# токену OIDC, который GitHub выдаёт только этому заданию в этой ветке.
+# В открытый журнал задания попадают только итоги — без адресов и ключей.
+#
+# Запуск — пушем в ветку lab/windows.
+on:
+  push:
+    branches:
+      - "lab/windows"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: windows-lab
+  cancel-in-progress: true
+
+jobs:
+  lab:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: amd64
+          - runner: windows-11-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.1"
+          cache-dependency-path: daemon/go.sum
+
+      - name: Prepare Xray sources
+        shell: bash
+        run: scripts/fetch-xray.sh
+
+      - name: Build daemon
+        working-directory: daemon
+        shell: bash
+        run: |
+          mkdir -p ../lab-bin
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o ../lab-bin/daemon.exe .
+
+      - name: Wintun
+        shell: bash
+        run: |
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            cp src-tauri/binaries/wintun.dll lab-bin/wintun.dll
+            want=e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce
+          else
+            curl -sSfL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+            unzip -q -o wintun.zip
+            cp wintun/bin/arm64/wintun.dll lab-bin/wintun.dll
+            want=f7ba89005544be9d85231a9e0d5f23b2d15b3311667e2dad0debd344918a3f80
+          fi
+          have=$(sha256sum lab-bin/wintun.dll | cut -d' ' -f1)
+          [ "$have" = "$want" ] || { echo "::error::wintun.dll не официальная 0.14.1 ($have)"; exit 1; }
+
+      - name: Lab
+        shell: pwsh
+        run: ./scripts/lab/lab.ps1 -Bin lab-bin -Arch ${{ matrix.arch }}

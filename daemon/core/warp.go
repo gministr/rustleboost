@@ -144,6 +144,9 @@ func wdttTransportConfig(dataDir string, transport subscription.Server, deviceID
 	if v := p["turnPort"]; v != "" {
 		cfg["turnPort"] = v
 	}
+	if v := p["relays"]; v != "" {
+		cfg["relays"] = v
+	}
 	// SRTP: тот же узел, другой порт; устройство регистрируется на узле само.
 	// На компьютере ни потолка памяти, ни экономии батареи: предел
 	// соединений транспорта и все ядра процессора.

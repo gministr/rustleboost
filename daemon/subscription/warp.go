@@ -82,9 +82,13 @@ func parseWdtt(raw string) (Server, error) {
 		"turnPort": q.Get("turnPort"),
 		// SRTP на том же узле (srtp=порт&srtpkey=ключ&srtptok=токен). Нет —
 		// обычный WDTT.
-		"srtp":    q.Get("srtp"),
-		"srtpkey": q.Get("srtpkey"),
-		"srtptok": q.Get("srtptok"),
+		"srtp":     q.Get("srtp"),
+		"srtpkey":  q.Get("srtpkey"),
+		"srtptok":  q.Get("srtptok"),
+		"srtpname": strings.TrimSpace(q.Get("srtpname")),
+		// Запасные релеи ВК для узла (через запятую): ядро подставляет их,
+		// когда свежие релеи не принимают учётные данные.
+		"relays": q.Get("relays"),
 	}
 	return Server{
 		ID:       newID(),
@@ -145,5 +149,57 @@ func FetchCatalog(ctx context.Context, subURL string, hwid HWIDHeaders) ([]Serve
 			wdtt = append(wdtt, s)
 		}
 	}
-	return wdtt, nil
+	return SplitSRTP(wdtt), nil
+}
+
+// SRTPNameSuffix — приписка к названию сервера через SRTP, как на iOS и Android.
+const SRTPNameSuffix = " · Новый"
+
+// SplitSRTP — узел с SRTP показывается двумя серверами, как на iOS
+// (ShareLinkParser.splittingSRTP): «стабильный» — прежний WDTT с прежним
+// названием (и потому прежним идентификатором: выбранный раньше сервер
+// остаётся выбранным), и «новый» — SRTP, быстрее, но работает не у всех.
+// Новые идут отдельным списком после всех стабильных. Название нового можно
+// задать в админке (srtpname).
+func SplitSRTP(servers []Server) []Server {
+	stable := make([]Server, 0, len(servers))
+	var fast []Server
+	for _, s := range servers {
+		if s.Engine != EngineWdtt || !HasSRTP(s) {
+			stable = append(stable, s)
+			continue
+		}
+		fastServer := s
+		fastServer.ID = newID()
+		fastServer.Params = cloneParams(s.Params)
+		fastServer.Protocol = "SRTP"
+		if name := s.Params["srtpname"]; name != "" {
+			fastServer.Name = name
+		} else {
+			fastServer.Name = s.Name + SRTPNameSuffix
+		}
+		fast = append(fast, fastServer)
+
+		plain := s
+		plain.Params = cloneParams(s.Params)
+		delete(plain.Params, "srtp")
+		delete(plain.Params, "srtpkey")
+		delete(plain.Params, "srtptok")
+		delete(plain.Params, "srtpname")
+		stable = append(stable, plain)
+	}
+	return append(stable, fast...)
+}
+
+// HasSRTP — в ссылке узла есть всё для SRTP.
+func HasSRTP(s Server) bool {
+	return s.Params["srtp"] != "" && s.Params["srtpkey"] != "" && s.Params["srtptok"] != ""
+}
+
+func cloneParams(params map[string]string) map[string]string {
+	out := make(map[string]string, len(params))
+	for k, v := range params {
+		out[k] = v
+	}
+	return out
 }

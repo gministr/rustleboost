@@ -76,7 +76,9 @@ func (m *Manager) connectXray(selected subscription.Server, opts config.Options,
 
 	session := &xraySession{cfg: string(cfgJSON), hysteria: upstream > 0, tun: opts.TUNMode}
 	if opts.TUNMode {
-		if err := enableTunFirewall(killSwitch, xrayTunDNS()); err != nil {
+		// Проверочная версия: защита DNS выключена, пока ищем, почему трафик
+		// программ не проходит через адаптер (вернуть перед выпуском).
+		if err := enableTunFirewallIf(killSwitch, xrayTunDNS()); err != nil {
 			// Без защиты DNS туннель работает, но провайдер может подменять
 			// адреса заблокированных сайтов — пишем, но не роняем подключение.
 			log.Printf("[firewall] защита DNS не включилась: %v", err)
@@ -212,4 +214,12 @@ func xrayTunDNS() []netip.Addr {
 		}
 	}
 	return out
+}
+
+// enableTunFirewallIf — проверочная версия: только Kill Switch, без защиты DNS.
+func enableTunFirewallIf(killSwitch bool, dns []netip.Addr) error {
+	if !killSwitch {
+		return nil
+	}
+	return enableTunFirewall(killSwitch, dns)
 }

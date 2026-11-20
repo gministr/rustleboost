@@ -96,10 +96,10 @@ func (h *directHub) close() {
 
 // directSession — интерфейс для одного запуска ядра (tun.Device).
 type directSession struct {
-	hub       *directHub
-	packets   chan []byte
-	done      chan struct{}
-	events    chan tun.Event
+	hub     *directHub
+	packets chan []byte
+	done    chan struct{}
+	events  chan tun.Event
 	// wake прерывает ожидающий Read (WakeRead): ядру надо отправить пакет
 	// своего внутреннего стека — проверку канала, DNS, SOCKS. Без этого такой
 	// пакет ждал, пока в адаптер придёт пакет какой-нибудь программы, и
