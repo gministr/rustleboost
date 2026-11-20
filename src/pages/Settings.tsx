@@ -22,7 +22,7 @@ function maskKey(url: string): string {
 function Confirm({ title, text, action, onConfirm, onCancel }: { title: string; text: string; action: string; onConfirm: () => void; onCancel: () => void }) {
   const t = useT();
   return (
-    <div className="fade-in" style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+    <div className="fade-in" style={{ position: "fixed", inset: 0, zIndex: 60, borderRadius: 14, background: "rgba(0,0,0,0.35)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
       <div className="card rise-in" style={{ maxWidth: 340, width: "100%", padding: 20, display: "flex", flexDirection: "column", gap: 10 }}>
         <div style={{ fontSize: 16, fontWeight: 800 }}>{title}</div>
         <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.4 }}>{text}</div>

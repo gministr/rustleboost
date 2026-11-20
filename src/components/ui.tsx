@@ -1,5 +1,5 @@
 import { ReactNode, CSSProperties } from "react";
-import { ChevronRight, LoaderCircle } from "lucide-react";
+import { Check, ChevronRight, LoaderCircle } from "lucide-react";
 
 // Базовые элементы — как DesignSystem приложения iOS/Mac: карточка,
 // переключатель, сегменты, строки настроек, кнопки.
@@ -12,8 +12,9 @@ export function Spinner({ size = 14 }: { size?: number }) {
   return <LoaderCircle size={size} className="spin" style={{ color: "var(--text-secondary)" }} />;
 }
 
-/** Переключатель в стиле Windows 11 (Fluent): капсула 40×20 с кругом.
- *  Выключен — только обводка, включён — заливка фирменным цветом. */
+/** Переключатель RustleBoost — свой, не как на iPhone и не как в Windows:
+ *  скруглённый прямоугольник с квадратной «клавишей». Включён — фирменная
+ *  заливка и отметка на клавише, выключен — спокойная подложка с точкой. */
 export function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
     <button
@@ -21,42 +22,31 @@ export function Toggle({ checked, onChange, disabled }: { checked: boolean; onCh
       aria-checked={checked}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="fluent-toggle"
-      style={{
-        width: 40, height: 20, borderRadius: 10, flexShrink: 0, position: "relative",
-        background: checked ? "var(--accent)" : "transparent",
-        border: checked ? "1px solid var(--accent)" : "1px solid var(--text-secondary)",
-        transition: "background 0.15s, border-color 0.15s", opacity: disabled ? 0.4 : 1,
-      }}
+      className={`rb-toggle${checked ? " on" : ""}`}
     >
-      <span className="fluent-knob" style={{
-        position: "absolute", top: "50%", left: checked ? 23 : 4, width: 12, height: 12, borderRadius: 6,
-        transform: "translateY(-50%)",
-        background: checked ? "#fff" : "var(--text-secondary)", transition: "left 0.15s, width 0.15s, background 0.15s",
-      }} />
+      <span className="rb-toggle-key">
+        {checked ? <Check size={12} strokeWidth={3.2} /> : <span className="rb-toggle-dot" />}
+      </span>
     </button>
   );
 }
 
-/** Сегментированный выбор — как Picker(.segmented). */
+/** Выбор из нескольких вариантов — ряд «клавиш»: выбранная подсвечена
+ *  фирменным цветом (не серая «пилюля» iPhone). */
 export function Segmented<T extends string>({ value, options, onChange }: {
   value: T; options: { value: T; label: string }[]; onChange: (v: T) => void;
 }) {
   return (
-    <div style={{ display: "flex", padding: 2, borderRadius: 9, background: "var(--surface-elevated)", gap: 2 }}>
+    <div className="rb-segmented" role="radiogroup">
       {options.map(o => {
         const active = o.value === value;
         return (
           <button
             key={o.value}
+            role="radio"
+            aria-checked={active}
             onClick={() => onChange(o.value)}
-            style={{
-              flex: 1, height: 28, borderRadius: 7, fontSize: 13, fontWeight: active ? 700 : 600,
-              color: active ? "var(--text-primary)" : "var(--text-secondary)",
-              background: active ? "var(--surface)" : "transparent",
-              boxShadow: active ? "0 1px 3px rgba(0,0,0,0.12)" : "none",
-              transition: "background 0.2s, color 0.2s",
-            }}
+            className={`rb-segment${active ? " on" : ""}`}
           >
             {o.label}
           </button>

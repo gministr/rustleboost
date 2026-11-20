@@ -57,7 +57,7 @@ export default function App() {
   const title = !hasSubscription ? undefined : page === "settings" ? t("settings.title") : page === "support" ? t("support.title") : undefined;
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg)", position: "relative", overflow: "hidden" }}>
+    <div className="app-frame" style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg)", position: "relative", overflow: "hidden" }}>
       <Toolbar title={title} onBack={hasSubscription && page !== "home" ? back : undefined} />
       {content}
       {entryOpen && hasSubscription && <Entry asSheet />}
